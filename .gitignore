@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.sqlite
+*.sqlite-*
+*.db
+*.pdf
+*.caj
+*.crdownload
+*.lock
+*.tmp
+research/
+reports/
+local-data/
+*receipts*.json
+task-snapshot.json

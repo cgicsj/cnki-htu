@@ -137,3 +137,11 @@ literal in XLSX and is prefixed with an apostrophe in CSV. Existing output folde
 are refused. Exports may be partial: consult progress and access levels.
 Keep the `.sqlite` file to resume; snapshot JSON is not an editable import format.
 Do not manually edit SQLite while a task is running or copy an active transaction.
+
+## Identity upgrades and compatibility
+
+Import builds batch indexes for normalized DOI, CNKI database/record ID, observed URLs and title/year warnings. Stable paper IDs never change after enrichment. Existing schema-v1 ledgers gain a `paper_aliases` table transactionally on first import; close the task and back it up before upgrading. New observed URL aliases persist across restarts. Conflicting strong IDs or multiple existing matches stop the transaction; existing duplicate rows are not silently merged.
+
+An explicitly incomplete author list can be upgraded to a verified complete list when the old list is a prefix in the same order. Other author changes remain conflicts requiring source review. Enrichment records before/after metadata in the event history. Session-bearing URLs, including encoded parameters, are rejected; extraction sources must be safe source URLs or absolute local paths.
+
+CLI queue/export hash artifacts before obtaining the write lock and compare the original receipt before invalidating it. Strict hashing remains enabled. Exports are staged and published as a complete directory under a per-destination lock, never overwritten. A stale publish lock requires checking the active process before removing it.

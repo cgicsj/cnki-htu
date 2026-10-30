@@ -1,6 +1,6 @@
 ---
 name: cnki-htu
-description: 通过河南师范大学 EasyConnect/VPN 和本地 Chrome 使用中国知网，完成检索、期刊浏览、文献筛选、PDF 下载、引用导出、推送 Zotero 及任务续跑。
+description: 通过河南师范大学 EasyConnect/VPN 和本地浏览器使用中国知网，完成检索、期刊浏览、文献筛选、PDF 下载、引用导出、推送 Zotero 及任务续跑。
 ---
 
 # cnki-htu · 河南师范大学知网
@@ -9,12 +9,12 @@ description: 通过河南师范大学 EasyConnect/VPN 和本地 Chrome 使用中
 
 ## 先确定访问状态
 
-需要访问网站时，先读取 [校园访问与认证](references/access.md)。使用用户本地、已登录 VPN 的 Chrome 会话。依次确认 EasyConnect/VPN 连接、校园知网页面、知网机构认证；进程存在或网页能打开不能单独证明认证成功。
+需要访问网站时，先读取 [浏览器选择](references/browser.md)，检查当前 agent 是否安装并可发现 `ego-browser` 技能；有则先读取该技能并优先使用。再读取 [校园访问与认证](references/access.md)，在所选本地浏览器内核验 VPN 路线和机构认证。已有 Chrome 登录不代表 ego-browser 已登录；进程存在或网页能打开不能单独证明认证成功。
 
 - VPN 服务：`https://vpn.htu.edu.cn`
 - 校园知网入口：`http://www-cnki-net-s.vpn.htu.edu.cn:8118`
 - 未连接时提示：请登录 https://www.htu.edu.cn/info/2011/0116/c18431a250850/page.htm，下载深信服 VPN（EasyConnect），输入 https://vpn.htu.edu.cn，使用学生账号和密码登录。完成后告诉我，我会重新检查连接和知网机构认证。
-- 认证失效、验证码或连接中断：保存进度，提示用户在 EasyConnect/Chrome 中手工完成，再重新观察页面并续跑。不要索取聊天中的密码或验证码，不导出 Cookie。
+- 认证失效、验证码或连接中断：保存进度，提示用户在 EasyConnect/所选浏览器中手工完成，再重新观察页面并续跑。不要索取聊天中的密码或验证码，不导出 Cookie。
 - 仅处理已有本地文件、离线引用转换或读取台账时不强制联网。恢复任务时先读台账，再对需要联网的剩余步骤检查访问状态。
 
 ## 按需求调用内部流程

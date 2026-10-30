@@ -1,0 +1,13 @@
+[
+  {
+    "title": "合成文献示例（非真实论文）",
+    "url": "https://example.org/synthetic-paper-1",
+    "database": "SYNTHETIC",
+    "record_id": "demo-1",
+    "retrieved_at": "2026-10-30T10:00:00+08:00",
+    "authors": ["测试作者"],
+    "authors_complete": true,
+    "journal": "合成示例期刊",
+    "year": "2026"
+  }
+]

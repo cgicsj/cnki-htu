@@ -1,6 +1,6 @@
 # cnki-htu
 
-`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 和 Chrome 使用中国知网，帮助完成文献检索、筛选、下载与整理。
+`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 和本地浏览器使用中国知网；检测到已安装的 `ego-browser` 技能时优先使用，否则使用 Chrome，帮助完成文献检索、筛选、下载与整理。
 
 ## 功能
 
@@ -15,8 +15,8 @@
 
 ## 使用前准备
 
-- Windows 本地环境、Google Chrome 和 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
-- 需要访问校园资源时，先登录河南师范大学 EasyConnect/VPN，并在 Chrome 中确认知网机构认证有效。校园访问入口和故障处理见[访问与认证说明](references/access.md)。
+- Windows 本地环境、ego-browser（已安装技能时优先）或 Google Chrome，以及 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
+- 需要访问校园资源时，先登录河南师范大学 EasyConnect/VPN，并在所选浏览器中确认知网机构认证有效。校园访问入口和故障处理见[访问与认证说明](references/access.md)。
 - 下载 PDF、Zotero 推送等能力受机构订阅、账号权限、浏览器设置及 Zotero 本地服务状态影响。
 - 首次登录、验证码或重新认证由用户在本机浏览器中完成；请勿在聊天中发送密码、验证码或浏览器 Cookie。
 
@@ -48,3 +48,26 @@ git clone https://github.com/cgicsj/cnki-htu.git "$env:USERPROFILE\.codex\skills
 ## 许可
 
 许可和第三方来源说明见 [`LICENSE`](LICENSE) 与 [`NOTICE.md`](NOTICE.md)。
+
+## 浏览器选择
+
+网页任务先检查 agent 技能清单和技能目录，安装了 `ego-browser` 时读取其 `SKILL.md`，按动态使用指南初始化并优先连接。未安装时使用本地 Chrome；连接不可用时明确报告并按可用能力回退。所选浏览器需要单独核验校园认证，不能沿用另一个浏览器的登录结论。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
+
+## 离线快速示例与测试
+
+在仓库根目录用 PowerShell 运行，`local-data` 已被 Git 忽略：
+
+```powershell
+New-Item -ItemType Directory -Path local-data -Force | Out-Null
+python scripts/workflow.py --task local-data/task.sqlite init --config examples/config.json
+python scripts/workflow.py --task local-data/task.sqlite import --input examples/records.json
+python scripts/workflow.py --task local-data/task.sqlite export --output local-data/report-001
+python scripts/convert.py examples/records.json --format json --output local-data/citations.bib
+python -m unittest discover -s tests -v
+```
+
+示例均为合成数据。重复执行时请换用新的台账/输出路径；既有任务直接续跑。测试只用临时目录和模拟 Zotero 客户端，不访问真实知网或文献库。CI 配置覆盖 Windows/Linux、Python 3.9/3.14；是否通过以实际 CI 结果为准。
+
+旧 SQLite 台账保留 schema_version=1 和原文献 ID，首次导入时自动添加身份别名表；升级前备份已关闭的台账。旧 Zotero v1 收据继续可读。补 DOI 等操作导致已保存题录变化时会阻止重推，需核对已有条目；这不会自动更新 Zotero 条目，也不能保证全库去重。
+
+环境检查可运行 `powershell -File scripts/check_environment.ps1`，仅输出技能/CLI、EasyConnect 安装与进程信号。认证仍须观察页面。导出遇到残留 `.publish.lock` 时先确认没有活跃导出进程再移除锁；保留已生成成果。所有私人研究输入和导出建议放在 `local-data/` 或仓库外。

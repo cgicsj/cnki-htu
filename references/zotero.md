@@ -6,7 +6,7 @@
 
 1. 在校园知网页面通过可见原生导出或完整详情页获取题录。复用已核对数据，不固定请求直连 GetExport。脚本接受规范 JSON，也可解析 ELEARNING 字符串；作者完整性仍须人工/代理根据真实内容核对。
 2. 使用 `python <skill-dir>/scripts/push_to_zotero.py --list` 读取当前分类与可用目标。未运行时提示启动 Zotero。用户指定分类时请其在 Zotero 选择，记录返回的 target（如 C123 或 L1）；未指定时使用当前分类并告知名称，已授权保存不再重复询问。
-3. 如要求 PDF，先经校园 Chrome 下载，打开/解析并核对题名。脚本只接受本地路径，不接收 pdfUrl、Cookie、密码或登录票据。
+3. 如要求 PDF，先经所选本地校园浏览器下载，打开/解析并核对题名。脚本只接受本地路径，不接收 pdfUrl、Cookie、密码或登录票据。
 
 输入示例（合成数据）：
 
@@ -45,3 +45,5 @@ stage 可为 metadata/pdf，outcome 可为 saved/not-saved。不得为了通过�
 Zotero 重启后旧 Connector 会话可能失效。题录已保存但 PDF 返回 SESSION_NOT_FOUND 时，通过 Zotero 可用界面/连接器把本地 PDF 附加到已有条目，再登记附件结果；不要再建题录。收据也不能证明用户后来没有删除条目。
 
 参考：[cookjohn 推送实现](https://github.com/cookjohn/cnki-skills/blob/20d65f660456daf53ad0f7c74494ac3b829b925f/skills/cnki-export/scripts/push_to_zotero.py)、[Zotero Connector 源码](https://github.com/zotero/zotero/blob/main/chrome/content/zotero/xpcom/server/server_connector.js)。本版重新实现了收据和本地 PDF 流程。
+
+补录 DOI 时会匹配 CNKI 身份及旧收据键，避免因身份升级重复建条目；已有条目的题录指纹变化会阻止重推，需在 Zotero 中核对和更新。该阻止结果不等于题录已同步更新，不要删除收据来绕过去重。

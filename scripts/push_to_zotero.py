@@ -19,6 +19,7 @@ from urllib.parse import urlsplit, parse_qsl, unquote
 import uuid
 
 from convert import normalize
+from common import aliases, legacy_identities, merge_metadata, source_url
 
 API = 'http://127.0.0.1:23119/connector/'
 
@@ -28,18 +29,7 @@ def digest(value):
 
 
 def public_url(value):
-    if not value:
-        return ''
-    p = urlsplit(value)
-    if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password or p.fragment:
-        raise ValueError('Use a public http(s) source URL without credentials or fragments')
-    if p.hostname == 'vpn.htu.edu.cn' or p.hostname.endswith('.vpn.htu.edu.cn'):
-        raise ValueError('Use an observed public citation URL/DOI, or omit url; do not save the campus proxy URL')
-    if any(re.search(r'token|ticket|session|password|cookie|authorization|saml', k, re.I) for k, _ in parse_qsl(p.query)):
-        raise ValueError('Source URL contains authentication/session parameters')
-    if re.search(r'(?:token|ticket|session|password|cookie|authorization)[=/]', unquote(p.path), re.I):
-        raise ValueError('Source URL contains an authentication path')
-    return value
+    return source_url(value, allow_proxy=False) if value else ''
 
 
 def parse_elearning(text):
@@ -113,7 +103,7 @@ def prepare(raw):
             for chunk in iter(lambda: handle.read(1024 * 1024), b''):
                 sha.update(chunk)
         pdf = {'path': str(path), 'sha256': sha.hexdigest()}
-    return {'identity': digest(identity), 'fingerprint': digest(item), 'item': item, 'pdf': pdf}
+    return {'metadata': meta, 'aliases': aliases(meta), 'legacy_keys': [digest(key) for key in legacy_identities(meta)], 'identity': digest(identity), 'fingerprint': digest(item), 'item': item, 'pdf': pdf}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -194,16 +184,29 @@ def push(papers, state_path, expected_target, client=None):
     client = client or Client()
     prepared = [prepare(p) for p in papers]  # Validate the full set before the first write.
     unique = {}
+    alias_index = {}
     for paper in prepared:
-        key = paper['identity']
+        matches = {alias_index[a] for a in paper['aliases'] if a in alias_index}
+        if len(matches) > 1:
+            raise ValueError('Multiple input identities match; resolve duplicates')
+        key = matches.pop() if matches else paper['identity']
         if key in unique:
             prior = unique[key]
-            if prior['fingerprint'] != paper['fingerprint'] or (prior['pdf'] and paper['pdf'] and prior['pdf']['sha256'] != paper['pdf']['sha256']):
+            prior['metadata'] = merge_metadata(prior['metadata'], paper['metadata'])
+            if any(prior['item'].get(k) and v and prior['item'][k] != v for k, v in paper['item'].items()) or (prior['pdf'] and paper['pdf'] and prior['pdf']['sha256'] != paper['pdf']['sha256']):
                 raise ValueError('Conflicting duplicate metadata or PDF; verify the source')
+            for name, value in paper['item'].items():
+                if not prior['item'].get(name) and value:
+                    prior['item'][name] = value
+            prior['fingerprint'] = digest(prior['item'])
+            prior['aliases'] = sorted(set(prior['aliases'] + paper['aliases']))
+            prior['legacy_keys'] = sorted(set(prior['legacy_keys'] + paper['legacy_keys']))
             if paper['pdf']:
                 prior['pdf'] = paper['pdf']
         else:
             unique[key] = paper
+        for alias in paper['aliases']:
+            alias_index[alias] = key
     target, collection = selected(client, expected_target)
     if any(p['pdf'] for p in unique.values()) and not collection.get('filesEditable', False):
         raise RuntimeError('Target does not support file attachments; no items were written')
@@ -211,12 +214,34 @@ def push(papers, state_path, expected_target, client=None):
     with locked_state(state_path) as (state, commit):
         for paper in unique.values():
             key = target + ':' + paper['identity']
+            possible = set()
+            for candidate in paper['legacy_keys']:
+                candidate_key = target + ':' + candidate
+                if candidate_key in state['records']:
+                    possible.add(candidate_key)
+            for candidate_key, candidate_row in state['records'].items():
+                if candidate_row.get('target') == target and set(candidate_row.get('aliases', [])) & set(paper['aliases']):
+                    possible.add(candidate_key)
+            if len(possible) > 1:
+                results.append({'key': key, 'status': 'blocked', 'reason': 'Multiple receipts match; reconcile manually'})
+                continue
+            if possible:
+                key = possible.pop()
             row = state['records'].get(key)
+            if row and any(
+                {a for a in row.get('aliases', []) if a.startswith(prefix)} and
+                {a for a in paper['aliases'] if a.startswith(prefix)} and
+                not ({a for a in row.get('aliases', []) if a.startswith(prefix)} &
+                     {a for a in paper['aliases'] if a.startswith(prefix)})
+                for prefix in ('doi:', 'cnki:')
+            ):
+                results.append({'key': key, 'status': 'blocked', 'reason': 'Conflicting strong identifiers; verify existing item'})
+                continue
             if row and row['fingerprint'] != paper['fingerprint']:
                 results.append({'key': key, 'status': 'blocked', 'reason': 'Metadata changed; reconcile existing item manually'})
                 continue
             if row is None:
-                row = {'fingerprint': paper['fingerprint'], 'target': target,
+                row = {'aliases': paper['aliases'], 'fingerprint': paper['fingerprint'], 'target': target,
                        'session': uuid.uuid4().hex, 'item_id': uuid.uuid4().hex,
                        'metadata': 'pending', 'pdf': 'pending', 'pdf_sha256': None}
                 state['records'][key] = row

@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from common import source_url, aliases, merge_metadata, evidence_source
 from xml.sax.saxutils import escape
 import zipfile
 
@@ -42,30 +42,11 @@ def required(value, label):
     return value.strip()
 
 
-def source_url(value):
-    required(value, 'url')
-    p = urlsplit(value)
-    if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
-        raise ValueError('Use a public source URL without credentials')
-    if re.search(r'(token|cookie|session|ticket|signature|password|auth)=', p.query, re.I):
-        raise ValueError('Do not persist session-bearing URLs')
-    return value
-
-
 def identity(rec):
-    raw_doi = rec.get('doi') or ''
-    if not isinstance(raw_doi, str):
-        raise ValueError('DOI must be text')
-    doi = raw_doi.strip().lower()
-    doi = re.sub(r'^(https?://(dx\.)?doi\.org/|doi:\s*)', '', doi)
-    if doi:
-        if not re.fullmatch(r'10\.\d{4,9}/\S+', doi):
-            raise ValueError('Invalid DOI')
-        return 'doi:' + doi
-    if rec.get('database') and rec.get('record_id'):
-        return 'cnki:' + required(rec['database'], 'database') + ':' + required(rec['record_id'], 'record_id')
-    # A source URL is a locator, not proof that matching titles are the same paper.
-    return 'url:' + hashlib.sha256(source_url(rec['url']).encode()).hexdigest()[:24]
+    keys = aliases(rec)
+    if not keys:
+        raise ValueError('A source URL or strong identifier is required')
+    return keys[0]
 
 
 def connect(path):
@@ -146,53 +127,53 @@ def set_stage(db, pid, name, status, reason='', artifact=None):
 def import_records(db, records):
     if not isinstance(records, list):
         raise ValueError('Input must be an array of records')
+    # Build once per batch; keep persisted stable IDs and legacy ledger schema.
+    metadata, index, titles = {}, {}, {}
+    db.execute('CREATE TABLE IF NOT EXISTS paper_aliases (alias TEXT PRIMARY KEY, paper_id TEXT NOT NULL REFERENCES papers(id))')
+    for row in db.execute('SELECT alias,paper_id FROM paper_aliases'):
+        index.setdefault(row['alias'], set()).add(row['paper_id'])
+    def title_key(rec):
+        return (re.sub(r'\s+', '', rec['title']).casefold(), str(rec.get('year', '')))
+    def register(pid, rec):
+        metadata[pid] = rec
+        for key in aliases(rec):
+            index.setdefault(key, set()).add(pid)
+            db.execute('INSERT OR IGNORE INTO paper_aliases(alias,paper_id) VALUES (?,?)', (key, pid))
+        titles.setdefault(title_key(rec), set()).add(pid)
+    for row in db.execute('SELECT id,metadata FROM papers'):
+        register(row['id'], json.loads(row['metadata']))
+    stages = config(db)['stages']
     result = []
     for rec in records:
         if not isinstance(rec, dict):
             raise ValueError('Each record must be an object')
         for key in ('title', 'url', 'retrieved_at'):
             required(rec.get(key), key)
-        source_url(rec['url'])
-        pid = identity(rec)
-        existing = db.execute('SELECT id,metadata FROM papers WHERE id=?', (pid,)).fetchone()
-        candidates = []
-        for row in db.execute('SELECT id,metadata FROM papers'):
-            other = json.loads(row['metadata'])
-            same_record = (rec.get('database') and rec.get('record_id') and
-                           rec.get('database') == other.get('database') and rec.get('record_id') == other.get('record_id'))
-            same_doi = rec.get('doi') and other.get('doi') and identity(rec) == identity(other)
-            same_locator = (rec['url'] == other['url'] and
-                            (identity(rec).startswith('url:') or identity(other).startswith('url:')))
-            if same_record or same_doi or same_locator or row['id'] == pid:
-                if same_record and rec.get('doi') and other.get('doi') and identity(rec) != identity(other):
-                    raise ValueError('Conflicting DOI for the same CNKI record')
-                candidates.append(row)
+        keys = aliases(rec)
+        candidates = set().union(*(index.get(key, set()) for key in keys))
         if len(candidates) > 1:
             raise ValueError('Multiple existing identities match; resolve duplicates before import')
         if candidates:
-            existing = candidates[0]
-            pid = existing['id']  # Keep the original stable key when new metadata adds a DOI.
-        if existing:
-            old = json.loads(existing['metadata'])
-            if any(old.get(k) and rec.get(k) and old[k] != rec[k] for k in ('title', 'year', 'authors', 'record_id', 'database')):
-                raise ValueError('Conflicting duplicate metadata for ' + pid)
-            # Enrich missing metadata without overwriting earlier evidence/results.
-            enriched = dict(old)
-            for key, val in rec.items():
-                if not enriched.get(key) and val:
-                    enriched[key] = val
+            pid = candidates.pop()
+            old = metadata[pid]
+            enriched = merge_metadata(old, rec)
             db.execute('UPDATE papers SET metadata=? WHERE id=?', (dump(enriched), pid))
+            if old != enriched:
+                event(db, pid, 'metadata-enriched', {'before': old, 'after': enriched})
+            # Retain observed URL aliases for the rest of this batch.
+            register(pid, enriched)
+            for key in keys:
+                index.setdefault(key, set()).add(pid)
+                db.execute('INSERT OR IGNORE INTO paper_aliases(alias,paper_id) VALUES (?,?)', (key, pid))
             result.append({'id': pid, 'status': 'existing'})
             continue
-        warnings = []
-        for row in db.execute('SELECT id,metadata FROM papers'):
-            other = json.loads(row['metadata'])
-            if re.sub(r'\s+', '', other['title']).casefold() == re.sub(r'\s+', '', rec['title']).casefold() and other.get('year') == rec.get('year'):
-                warnings.append(row['id'])
+        pid = identity(rec)
+        warnings = sorted(titles.get(title_key(rec), set()))
         db.execute('INSERT INTO papers(id,metadata) VALUES (?,?)', (pid, dump(rec)))
-        for s in config(db)['stages']:
-            db.execute('INSERT INTO stages(paper_id,stage,status,updated_at) VALUES (?,?,?,?)', (pid, s, 'pending', now()))
+        for stage_name in stages:
+            db.execute('INSERT INTO stages(paper_id,stage,status,updated_at) VALUES (?,?,?,?)', (pid, stage_name, 'pending', now()))
         event(db, pid, 'import', {'possible_duplicates': warnings})
+        register(pid, rec)
         result.append({'id': pid, 'status': 'added', 'possible_duplicates': warnings})
     return result
 
@@ -247,6 +228,7 @@ def extract(db, pid, value):
             raise ValueError(name + ': use an evidence object or null')
         for key in ('value', 'quote', 'locator', 'source'):
             required(cell.get(key), name + '.' + key)
+        evidence_source(cell['source'])
         if value['access_level'] == 'abstract_only' and cell['locator'] != '摘要':
             raise ValueError('Abstract evidence locator must be 摘要')
     if not any(cell for cell in fields.values()):
@@ -304,8 +286,9 @@ def mark(db, pid, name, status, reason='', path=None, identity_verified=False):
     return {'id': pid, 'stage': name, 'status': status}
 
 
-def queue(db):
-    # Never automatically requeue an in-flight transfer; inspect it first.
+def inspect_artifacts(db):
+    """Read/hash files without acquiring a SQLite write lock."""
+    invalid = []
     for row in db.execute("SELECT * FROM stages WHERE status='done' AND artifact IS NOT NULL").fetchall():
         artifact = json.loads(row['artifact'])
         try:
@@ -314,6 +297,15 @@ def queue(db):
         except (OSError, ValueError):
             valid = False
         if not valid:
+            invalid.append(dict(row))
+    return invalid
+
+
+def queue(db, checked=None):
+    # Compare the observed receipt before resetting; another worker may update it.
+    for row in inspect_artifacts(db) if checked is None else checked:
+        current = stage(db, row['paper_id'], row['stage'])
+        if current['status'] == 'done' and current['artifact'] == row['artifact'] and current['updated_at'] == row['updated_at']:
             set_stage(db, row['paper_id'], row['stage'], 'pending', 'Saved file missing or changed; verify before retry')
     result = []
     for row in db.execute('SELECT s.*,p.metadata FROM stages s JOIN papers p ON s.paper_id=p.id ORDER BY p.rowid,s.rowid'):
@@ -399,8 +391,8 @@ def write_xlsx(path, sheets):
             z.writestr('xl/worksheets/sheet%d.xml' % i, '<worksheet xmlns="' + ns + '"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="%d" width="28" customWidth="1"/></cols><sheetData>' % len(rows[0]) + ''.join(body) + '</sheetData><autoFilter ref="A1:%s%d"/></worksheet>' % (column(len(rows[0])), len(rows)))
 
 
-def export(db, directory):
-    queue(db)  # Revalidate recorded artifacts before reporting completion.
+def export(db, directory, checked=None):
+    queue(db, checked)  # Revalidate recorded artifacts before reporting completion.
     dest = Path(directory)
     if dest.exists():
         raise FileExistsError('Choose a new output folder; exports never overwrite')
@@ -415,10 +407,16 @@ def export(db, directory):
                 csv.writer(f).writerows([["'" + str(v) if str(v).lstrip().startswith(('=', '+', '-', '@')) else v for v in row] for row in rows])
         snapshot = {'config': config(db), 'papers': [dict(r) for r in db.execute('SELECT * FROM papers')], 'stages': [dict(r) for r in db.execute('SELECT * FROM stages')], 'events': [dict(r) for r in db.execute('SELECT * FROM events')]}
         (temp / 'task-snapshot.json').write_text(dump(snapshot), encoding='utf-8')
-        # mkdir is exclusive: concurrent exports cannot replace each other.
-        dest.mkdir()
-        for f in temp.iterdir():
-            os.replace(str(f), str(dest / f.name))
+        # Cooperative exporters serialize publication; never replace an output.
+        lock = dest.with_name(dest.name + '.publish.lock')
+        with lock.open('x'):
+            pass
+        try:
+            if dest.exists():
+                raise FileExistsError('Choose a new output folder; exports never overwrite')
+            temp.rename(dest)
+        finally:
+            lock.unlink()
     return {'directory': str(dest.resolve()), 'workbook': str((dest / '研究工作表.xlsx').resolve()), 'papers': len(data['文献筛选表']) - 1}
 
 
@@ -446,15 +444,16 @@ def main(argv=None):
         else:
             db = connect(args.task)
             try:
+                checked = inspect_artifacts(db) if args.command in ('queue', 'export') else None
                 with db:
-                    db.execute('BEGIN IMMEDIATE')
+                    db.execute('BEGIN' if args.command == 'status' else 'BEGIN IMMEDIATE')
                     if args.command == 'import': result = import_records(db, value)
                     elif args.command == 'screen': result = screen(db, args.id, value)
                     elif args.command == 'extract': result = extract(db, args.id, value)
                     elif args.command == 'mark': result = mark(db, args.id, args.stage, args.status, args.reason, args.artifact, args.identity_verified)
-                    elif args.command == 'queue': result = queue(db)
+                    elif args.command == 'queue': result = queue(db, checked)
                     elif args.command == 'status': result = status(db)
-                    else: result = export(db, args.output)
+                    else: result = export(db, args.output, checked)
             finally:
                 db.close()
         print(json.dumps(result, ensure_ascii=False, indent=2))

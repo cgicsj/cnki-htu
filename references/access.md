@@ -2,24 +2,24 @@
 
 ## 固定配置与证据
 
-本技能采用用户指定的深信服路线：EasyConnect → `https://vpn.htu.edu.cn` → 本地 Chrome → `http://www-cnki-net-s.vpn.htu.edu.cn:8118`。
+本技能采用用户指定的深信服路线：EasyConnect → `https://vpn.htu.edu.cn` → 所选本地浏览器 → `http://www-cnki-net-s.vpn.htu.edu.cn:8118`。
 
 [学校说明](https://www.htu.edu.cn/info/2011/0116/c18431a250850/page.htm)同时列出深信服 VPN 和另一套 WEB VPN（v.htu.edu.cn）。本技能的“WebVPN”名称沿用用户称呼，不把两套入口混用。学校说明账号密码与办事大厅相同；提示用户自行输入学生账号密码，不代填猜测值。
 
 2026-10-21 在线实测补充：
 
 - 客户端连上后，知网相关域名在 Windows 上解析到深信服虚拟地址段（`198.18.0.0/15`），例如 `www-cnki-net-s.vpn.htu.edu.cn`、`kns-cnki-net-s.vpn.htu.edu.cn`、`docdown-cnki-net-s.vpn.htu.edu.cn`、`bar-cnki-net-s.vpn.htu.edu.cn`、`vpn.htu.edu.cn`。域名解析到该网段只说明隧道在转发，仍不代表已完成机构认证。
-- 直接请求 `http://www-cnki-net-s.vpn.htu.edu.cn:8118` 会返回深信服的跳转外壳，把浏览器送到 `https://vpn.htu.edu.cn/portal?redirect_uri=...`。用不带浏览器 Cookie 的普通 HTTP 会话无法完成该认证，机构认证必须在用户本地 Chrome 里核验。
+- 直接请求 `http://www-cnki-net-s.vpn.htu.edu.cn:8118` 会返回深信服的跳转外壳，把浏览器送到 `https://vpn.htu.edu.cn/portal?redirect_uri=...`。用不带浏览器 Cookie 的普通 HTTP 会话无法完成该认证，机构认证必须在本次所选的用户本地浏览器里核验。
 - 认证成功的可观察信号是检索结果页顶部的机构名（实测为“河南师范大学图书馆”，出现在 `ecp_header_unitName` 与 `ecp_unitAccountName` 元素中）。个人登录状态与机构名是两回事，不要把“个人登录”当成机构认证。
 - 校园入口按资源类型分发到不同子域；下载涉及的子域与内容拦截扩展见 [Chrome HTTP 下载与连续 PDF 下载](downloads.md)。
 
 ## 检查顺序
 
-1. 读取当前运行环境支持的浏览器/桌面工具文档。连接本地 Chrome 的现有会话，避免切换到云端或未登录的隔离浏览器。Codex 使用其已提供的 Chrome 工具；Claude Code 可使用已配置的 Chrome DevTools MCP。缺少本地 Chrome 连接能力时报告所缺能力，让用户连接；安装技能本身不安装浏览器插件。
+1. 先按[浏览器选择](browser.md)检查当前 agent 是否安装 ego-browser 技能；有则读取技能和动态指南并优先使用。未安装时使用本地 Chrome。连接不可用时报告实际状态并按可用能力回退。在所选浏览器内核验认证，不复用其他浏览器的登录结论；安装本技能本身不安装浏览器插件。
 2. Windows 可运行 `scripts/check_environment.ps1`，得到 EasyConnect 进程和安装路径信号。它明确返回 `authentication=unknown`，不是登录判断器。如果需要打开已安装客户端，运行带 `-LaunchEasyConnect` 的命令，让用户在可见客户端中登录；程序不存在时打开学校说明页让用户下载。其他系统使用当前桌面工具查看 EasyConnect。
 3. 如果桌面工具支持，读取 EasyConnect 中实际的已连接/连接成功状态及服务器；不能只看托盘图标或进程名。如果当前环境不能读取客户端状态，标记“客户端状态未核验”，继续用校园页面和机构认证核验可用访问，不能宣称检测到已登录。
 4. 按校园入口逐页进入知网，不拼接代理地址或猜测新标签 URL：
-   - 在本地 Chrome 打开 `https://vpn.htu.edu.cn`。若页面显示已登录并提供“打开资源界面”按钮，点击该按钮一次，然后等待新打开的页面或标签；新页面可能不会替换当前 VPN 标签。等待期间重新读取 Chrome 的标签/窗口列表和页面状态，最多等待 10 秒。
+   - 在所选本地浏览器打开 `https://vpn.htu.edu.cn`。若页面显示已登录并提供“打开资源界面”按钮，点击该按钮一次，然后等待新打开的页面或标签；新页面可能不会替换当前 VPN 标签。等待期间重新读取所选浏览器的标签/窗口列表和页面状态，最多等待 10 秒。
    - 在新页面中确认资源列表已加载，再点击可见的“CNKI中国知网”模块。随后等待该模块打开的知网页面或标签，并从页面本身实际提供的链接继续操作；不要直达代理子域、猜测路由或复用旧选择器。
    - 每次点击后都检查页面、标签及 URL 是否有变化。若按钮点击后没有新页面，先重新观察一次；最多再尝试一次。连续两次仍无进展就停止操作、保留当前页面并报告阻碍，不要循环重试。
    - 进入候选知网页面后，确认页面确为知网，并检查是否返回 VPN 登录页、出现连接错误或要求重新认证。可访问知网检索页只证明页面可达；仍须单独核验机构认证。

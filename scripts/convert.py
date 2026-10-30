@@ -7,7 +7,7 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlsplit
+from common import aliases, doi, merge_metadata, source_url
 
 
 def clean(value):
@@ -106,36 +106,44 @@ def normalize(rec):
         raise ValueError("title and journal are required")
     if "year" in out and not re.fullmatch(r"\d{4}", out["year"]):
         raise ValueError("year must be a four-digit string")
-    if "doi" in out:
-        out["doi"] = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", out["doi"], flags=re.I).lower()
-        if not re.fullmatch(r"10\.\d{4,9}/\S+", out["doi"]):
-            raise ValueError("invalid DOI")
-    if "url" in out:
-        parsed = urlsplit(out["url"])
-        if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username:
-            raise ValueError("URL must be an ordinary http(s) source URL")
-        if re.search(r"(?:token|ticket|session|password|cookie|authorization)=", parsed.query, re.I):
-            raise ValueError("remove credential/session parameters from source URL")
+    if 'doi' in out:
+        out['doi'] = doi(out['doi'])
+    if 'url' in out:
+        source_url(out['url'])
+    for key in aliases(rec):
+        if key.startswith('cnki:'):
+            out['cnki_id'] = key[5:]
     return out
 
 
 def render(records):
     unique, seen, warnings = [], {}, []
-    for rec in records:
-        rec = normalize(rec)
-        identity = ("doi", rec["doi"]) if rec.get("doi") else (
-            ("cnki", rec["cnki_id"]) if rec.get("cnki_id") else
-            ("fallback", rec["title"], rec.get("year", ""), rec["journal"], tuple(rec["authors"])))
-        if identity in seen:
-            prior = seen[identity]
-            if any(prior[k] != v for k, v in rec.items() if k in prior and k != "url"):
-                raise ValueError("conflicting duplicate metadata; verify source")
-            for k, v in rec.items():
-                prior.setdefault(k, v)
-            warnings.append("duplicate record merged")
-            continue
-        seen[identity] = rec
-        unique.append((identity, rec))
+    for raw in records:
+        rec = normalize(raw)
+        keys = aliases(rec)
+        fallback = ('fallback', rec['title'], rec.get('year', ''), rec['journal'], tuple(rec['authors']))
+        # Metadata-only records are deliberately not matched to strong IDs.
+        if not keys:
+            keys = [fallback]
+        matches = {seen[key] for key in keys if key in seen}
+        if len(matches) > 1:
+            raise ValueError('Multiple existing identities match; resolve duplicates')
+        if matches:
+            idx = matches.pop()
+            prior = unique[idx][1]
+            merged = merge_metadata(prior, rec)
+            for k in ('volume', 'issue', 'pages'):
+                if prior.get(k) and rec.get(k) and prior[k] != rec[k]:
+                    raise ValueError('Conflicting duplicate metadata: ' + k)
+            prior.update(merged)
+            warnings.append('duplicate record merged')
+        else:
+            idx = len(unique)
+            identity = ('doi', rec['doi']) if rec.get('doi') else (
+                ('cnki', rec['cnki_id']) if rec.get('cnki_id') else fallback)
+            unique.append((identity, rec))
+        for key in keys:
+            seen[key] = idx
     if not unique:
         raise ValueError("no citation records")
     entries = []
