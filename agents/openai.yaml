@@ -1,4 +1,4 @@
 interface:
   display_name: "cnki-htu"
   short_description: "通过校园 VPN 检索知网、下载 PDF、筛选文献并推送 Zotero"
-  default_prompt: "使用 $cnki-htu 完成我的文献任务；需要网页时，优先使用已安装的 ego-browser 技能并核验校园认证。"
+  default_prompt: "使用 $cnki-htu 完成我的文献任务；需要网页时，优先通过 chrome-mcp 操作本地 Chrome 并核验校园认证。"

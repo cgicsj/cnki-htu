@@ -9,7 +9,7 @@ description: 通过河南师范大学 EasyConnect/VPN 和本地浏览器使用�
 
 ## 先确定访问状态
 
-需要访问网站时，先读取 [浏览器选择](references/browser.md)，检查当前 agent 是否安装并可发现 `ego-browser` 技能；有则先读取该技能并优先使用。再读取 [校园访问与认证](references/access.md)，在所选本地浏览器内核验 VPN 路线和机构认证。已有 Chrome 登录不代表 ego-browser 已登录；进程存在或网页能打开不能单独证明认证成功。
+需要访问网站时，先读取 [浏览器选择](references/browser.md)，优先使用 `chrome-mcp` 连接用户本地 Chrome 会话。再读取 [校园访问与认证](references/access.md)，在实际连接的 Chrome 会话内核验 VPN 路线和机构认证；进程存在或网页能打开不能单独证明认证成功。
 
 - VPN 服务：`https://vpn.htu.edu.cn`
 - 校园知网入口：`http://www-cnki-net-s.vpn.htu.edu.cn:8118`

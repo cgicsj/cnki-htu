@@ -1,6 +1,6 @@
 # cnki-htu
 
-`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 和本地浏览器使用中国知网；检测到已安装的 `ego-browser` 技能时优先使用，否则使用 Chrome，帮助完成文献检索、筛选、下载与整理。
+`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 使用中国知网，优先通过 `chrome-mcp` 操作本地 Chrome，帮助完成文献检索、筛选、下载与整理。
 
 ## 功能
 
@@ -15,7 +15,7 @@
 
 ## 使用前准备
 
-- Windows 本地环境、ego-browser（已安装技能时优先）或 Google Chrome，以及 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
+- Windows 本地环境、Google Chrome、可连接本地 Chrome 会话的 `chrome-mcp`，以及 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
 - 需要访问校园资源时，先登录河南师范大学 EasyConnect/VPN，并在所选浏览器中确认知网机构认证有效。校园访问入口和故障处理见[访问与认证说明](references/access.md)。
 - 下载 PDF、Zotero 推送等能力受机构订阅、账号权限、浏览器设置及 Zotero 本地服务状态影响。
 - 首次登录、验证码或重新认证由用户在本机浏览器中完成；请勿在聊天中发送密码、验证码或浏览器 Cookie。
@@ -51,7 +51,7 @@ git clone https://github.com/cgicsj/cnki-htu.git "$env:USERPROFILE\.codex\skills
 
 ## 浏览器选择
 
-网页任务先检查 agent 技能清单和技能目录，安装了 `ego-browser` 时读取其 `SKILL.md`，按动态使用指南初始化并优先连接。未安装时使用本地 Chrome；连接不可用时明确报告并按可用能力回退。所选浏览器需要单独核验校园认证，不能沿用另一个浏览器的登录结论。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
+网页任务先检查当前 agent 提供的 `chrome-mcp` 工具，读取工具说明并优先连接本地 Chrome。连接不可用时明确报告实际状态；仅在其他可用工具能连接并核验本地 Chrome 会话时回退。每个会话需要单独核验校园认证，不能沿用其他会话的登录结论。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
 
 ## 离线快速示例与测试
 

@@ -15,24 +15,19 @@ foreach ($process in $processes) {
 }
 $installed = @($candidates | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
 $launched = $false
-$skillRoots = @((Join-Path $env:USERPROFILE '.agents\skills'), (Join-Path $env:USERPROFILE '.codex\skills'), (Join-Path (Get-Location) '.agents\skills'))
-if ($env:CODEX_HOME) { $skillRoots += Join-Path $env:CODEX_HOME 'skills' }
-$egoSkills = @($skillRoots | Select-Object -Unique | ForEach-Object { Join-Path $_ 'ego-browser\SKILL.md' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
-$egoCommand = Get-Command ego-browser -ErrorAction SilentlyContinue
 if ($LaunchEasyConnect -and $processes.Count -eq 0 -and $installed.Count -gt 0) {
     # Interactive login is the requested purpose of this explicit switch.
     Start-Process -FilePath $installed[0] -WindowStyle Normal
     $launched = $true
 }
 [ordered]@{
-    ego_browser_skill_candidates = $egoSkills
-    ego_browser_cli_available = [bool]$egoCommand
-    browser_preference = 'Read the agent skill catalog first; prefer installed ego-browser after following its SKILL.md. Files/CLI alone do not prove connectivity or authentication.'
+    browser_preference = 'Prefer chrome-mcp to operate the local Chrome session; read the current tool documentation before use.'
+    chrome_mcp_availability = 'unknown; inspect the current agent tool catalog and verify the actual Chrome connection'
     easyconnect_process_seen = ($processes.Count -gt 0)
     executable_candidates = $installed
     launched_for_manual_login = $launched
     authentication = 'unknown'
-    next_check = 'Select ego-browser when installed, otherwise local Chrome; inspect EasyConnect, campus CNKI page, and institution authentication in that browser.'
+    next_check = 'Connect to local Chrome with chrome-mcp; inspect EasyConnect, campus CNKI page, and institution authentication in that session.'
     vpn_url = 'https://vpn.htu.edu.cn'
     cnki_url = 'http://www-cnki-net-s.vpn.htu.edu.cn:8118'
     help_url = 'https://www.htu.edu.cn/info/2011/0116/c18431a250850/page.htm'
