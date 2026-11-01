@@ -241,12 +241,21 @@ def extract(db, pid, value):
     return {'id': pid, 'fields': sum(c is not None for c in fields.values()), 'access_level': value['access_level']}
 
 
-def fingerprint(path):
+def fingerprint(path, require_pdf=False):
     p = Path(path).expanduser().resolve()
     if not p.is_file() or p.stat().st_size == 0:
         raise ValueError('Missing or empty artifact: ' + str(p))
+    if require_pdf and p.suffix.lower() in ('.crdownload', '.part', '.partial', '.tmp'):
+        raise ValueError('Download still has a temporary filename; confirm browser completion first')
     digest = hashlib.sha256()
     with p.open('rb') as f:
+        if require_pdf:
+            header = f.read(5)
+            f.seek(max(0, p.stat().st_size - 4096))
+            trailer = f.read()
+            if header != b'%PDF-' or b'%%EOF' not in trailer:
+                raise ValueError('File lacks PDF framing; HTML, CAJ and truncated downloads cannot be completed')
+            f.seek(0)
         for chunk in iter(lambda: f.read(1024 * 1024), b''):
             digest.update(chunk)
     return {'path': str(p), 'sha256': digest.hexdigest(), 'bytes': p.stat().st_size}
@@ -266,11 +275,7 @@ def mark(db, pid, name, status, reason='', path=None, identity_verified=False):
             raise ValueError('Use screen/extract to validate evidence before completion')
         if not path or not identity_verified:
             raise ValueError('Completion requires --artifact and --identity-verified after reading the file')
-        artifact = fingerprint(path)
-        if name == 'download':
-            with Path(artifact['path']).open('rb') as f:
-                if f.read(5) != b'%PDF-':
-                    raise ValueError('Artifact is not a PDF; CAJ/HTML must not be marked PDF-complete')
+        artifact = fingerprint(path, require_pdf=name == 'download')
         artifact['identity_verified'] = True
     else:
         artifact = None
@@ -292,7 +297,7 @@ def inspect_artifacts(db):
     for row in db.execute("SELECT * FROM stages WHERE status='done' AND artifact IS NOT NULL").fetchall():
         artifact = json.loads(row['artifact'])
         try:
-            actual = fingerprint(artifact['path'])
+            actual = fingerprint(artifact['path'], require_pdf=row['stage'] == 'download')
             valid = actual['sha256'] == artifact['sha256']
         except (OSError, ValueError):
             valid = False
@@ -306,7 +311,7 @@ def queue(db, checked=None):
     for row in inspect_artifacts(db) if checked is None else checked:
         current = stage(db, row['paper_id'], row['stage'])
         if current['status'] == 'done' and current['artifact'] == row['artifact'] and current['updated_at'] == row['updated_at']:
-            set_stage(db, row['paper_id'], row['stage'], 'pending', 'Saved file missing or changed; verify before retry')
+            set_stage(db, row['paper_id'], row['stage'], 'pending', 'Saved file missing, changed or invalid; verify before retry')
     result = []
     for row in db.execute('SELECT s.*,p.metadata FROM stages s JOIN papers p ON s.paper_id=p.id ORDER BY p.rowid,s.rowid'):
         item = dict(row)

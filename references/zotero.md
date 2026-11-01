@@ -1,11 +1,11 @@
 # 推送 Zotero
 
-只有用户要求保存到 Zotero 时执行写入。目标为本机 Zotero 桌面端 Connector 服务，无需 API Key。Zotero 自身的同步设置决定后续是否同步。
+只有用户要求保存到 Zotero 时执行写入。脚本默认优先连接本机 Zotero MCP（默认 `http://127.0.0.1:23120/mcp`，可由 `ZOTERO_MCP_URL` 覆盖），使用 MCP 创建题录、加入目标分类并导入本地 PDF。MCP 在任何写入前不可用时，`--transport auto` 才回退到本机 Zotero Connector；不会在 MCP 写入结果不明后自动切换通道或重发。Zotero 自身的同步设置决定后续是否同步。
 
 ## 准备题录和目标
 
 1. 在校园知网页面通过可见原生导出或完整详情页获取题录。复用已核对数据，不固定请求直连 GetExport。脚本接受规范 JSON，也可解析 ELEARNING 字符串；作者完整性仍须人工/代理根据真实内容核对。
-2. 使用 `python <skill-dir>/scripts/push_to_zotero.py --list` 读取当前分类与可用目标。未运行时提示启动 Zotero。用户指定分类时请其在 Zotero 选择，记录返回的 target（如 C123 或 L1）；未指定时使用当前分类并告知名称，已授权保存不再重复询问。
+2. 使用 `python <skill-dir>/scripts/push_to_zotero.py --list` 优先读取 MCP 可见的文库和分类。若当前 Connector 选择能与 MCP 分类唯一对应，输出会同时给出兼容目标（如 `C1`）和 `mcpTarget`；否则从 `targets` 中选择 `M<libraryID>:<collectionKey>`。未运行时提示启动 Zotero。用户指定分类时请其在 Zotero 选择，核对输出目标；已授权保存不再重复询问。
 3. 如要求 PDF，先经所选本地校园浏览器下载，打开/解析并核对题名。脚本只接受本地路径，不接收 pdfUrl、Cookie、密码或登录票据。
 
 输入示例（合成数据）：
@@ -22,10 +22,10 @@ URL 使用实际导出的公开题录链接；如果只有校园代理地址，�
 
 ```sh
 python <skill-dir>/scripts/push_to_zotero.py papers.json --dry-run
-python <skill-dir>/scripts/push_to_zotero.py papers.json --state <research-folder>/zotero-receipts.json --expect-target C123
+python <skill-dir>/scripts/push_to_zotero.py papers.json --state <research-folder>/zotero-receipts.json --expect-target C1
 ```
 
-dry-run 完全离线。收据文件选在研究目录，续跑必须复用。脚本对 localhost 禁用系统 HTTP 代理及重定向，逐篇保存题录再附加本地 PDF，只把 HTTP 201 记为相应阶段成功。执行期间保持 Zotero 目标分类不变。
+需要强制使用某一路线时，可加 `--transport mcp` 或 `--transport connector`；默认 `auto` 优先 MCP，仅在 MCP 初始化/能力发现失败且尚未写入时回退 Connector。`--list --transport connector` 可单独查看 Connector 当前选择。dry-run 完全离线。收据文件选在研究目录，续跑必须复用。MCP 路线以工具成功响应作为阶段确认；Connector 路线只把 HTTP 201 记为相应阶段成功。执行期间保持 Zotero 目标分类不变。
 
 返回 JSON 分别报告题录、附件和整体结果。退出码 0=全部请求完成，2=部分未完成，1=输入/连接/状态错误。metadata=saved 但附件失败时，应报告“题录已保存，附件未保存”。
 
@@ -34,6 +34,7 @@ dry-run 完全离线。收据文件选在研究目录，续跑必须复用。脚
 - 同一收据、同一目标内，按 DOI、数据库记录 ID 或多字段身份复用成功项；同名论文不直接合并。字段冲突停止该条。
 - 这是任务收据去重，不能查询全库；已手工导入、其他任务或设备中的条目需在 Zotero 核对。
 - 发送前记 sending，成功后记 saved。超时、断线、HTTP 409 或中断可能已经产生条目，不能当成功或自动重发。
+- MCP 路线将创建后的 Zotero item key 保存到收据，用于后续附件导入和续跑。旧 Connector 收据没有 MCP item key 时，若题录已保存但附件未完成，脚本会阻止 MCP 路线继续；核对实际题录后，可显式使用 `--transport connector` 续跑，不会自动创建第二条题录。
 - 先在 Zotero 查看实际条目，再执行手工核验登记，随后续跑原输入：
 
 ```sh
@@ -42,7 +43,9 @@ python <skill-dir>/scripts/push_to_zotero.py --state <research-folder>/zotero-re
 
 stage 可为 metadata/pdf，outcome 可为 saved/not-saved。不得为了通过流程而虚构核验。锁文件残留时先确认进程已退出，再移除明确的 .lock；不要删除收据。
 
-Zotero 重启后旧 Connector 会话可能失效。题录已保存但 PDF 返回 SESSION_NOT_FOUND 时，通过 Zotero 可用界面/连接器把本地 PDF 附加到已有条目，再登记附件结果；不要再建题录。收据也不能证明用户后来没有删除条目。
+附件标为 blocked 后，重复执行只报告阻碍，不再次上传。修复明确的拒绝原因并核对附件确实未保存后，才用 `--resolve ... --stage pdf --outcome not-saved --note "核验与修复说明"` 将其恢复为 pending；这条登记本身不会修复失效的 Connector 会话。sending/uncertain 同样先核对实际结果，不能盲目重发。
+
+Zotero 重启后旧 Connector 会话可能失效。题录已保存但 PDF 返回 SESSION_NOT_FOUND 时，通过 Zotero 可用界面/连接器把本地 PDF 附加到已有条目，打开附件并核对题名/页数后，再登记 pdf=saved；保留原 HTTP 错误与核验说明，不要再建题录。收据也不能证明用户后来没有删除条目。
 
 参考：[cookjohn 推送实现](https://github.com/cookjohn/cnki-skills/blob/20d65f660456daf53ad0f7c74494ac3b829b925f/skills/cnki-export/scripts/push_to_zotero.py)、[Zotero Connector 源码](https://github.com/zotero/zotero/blob/main/chrome/content/zotero/xpcom/server/server_connector.js)。本版重新实现了收据和本地 PDF 流程。
 

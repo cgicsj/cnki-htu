@@ -1,14 +1,14 @@
 # CNKI download
 
-First read [Chrome permissions and paced downloads](../downloads.md). For this adaptation, sequential downloads are the default; the shared paced-download rules override upstream batch preferences.
+Confirm the environment check already completed [Chrome permissions](../downloads.md) before search/download; if its result is missing, return to environment setup instead of starting a transfer. Read the same reference for paced downloads. Sequential downloads are the default; the shared paced-download rules override upstream batch preferences.
 
 1. Verify the requested paper identity and the user's download request. Default to PDF unless the user explicitly requests another format. Carry this preference through retries and batch operations. Before starting any transfer, create the local date folder described below.
 2. Inspect the paper's observed native download controls, including any download menu. Prefer a control explicitly labeled PDF or PDF下载. A generic 下载/整本下载 button does not establish the format; inspect its options or the paper detail page before proceeding. Do not reconstruct file endpoints, change URL parameters to force PDF, replay cookies, use another institution's proxy or purchase access without explicit authority.
 3. If no authorized PDF option is available after inspecting those controls, mark the item “PDF unavailable” or “PDF access blocked” as appropriate and continue other requested items. Do not silently fall back to CAJ. Download CAJ only if the user explicitly requests or accepts it; prior acceptance within the same task remains valid. Do not rename CAJ to .pdf, install a converter/viewer or print HTML as a substitute PDF unless separately requested.
-4. Verify the actual file using the browser's documented download receipt or an authorized local directory: completed transfer, non-empty file and matching paper identity. For PDF, confirm PDF content using file-type inspection or a PDF reader/parser; extension alone is insufficient. CAJ or an HTML login/error page saved as .pdf is failure. Report an unexpected format and retain the PDF preference on retry; do not delete the unexpected file automatically.
+4. Verify the actual file using the browser's documented download receipt or an authorized local directory: completed transfer, non-empty file and matching paper identity. For PDF, check its header/trailer and open it with a PDF reader/parser; framing alone does not prove readability or identity. The ledger rejects files without `%PDF-`/`%%EOF` framing and temporary names such as `.crdownload`. CAJ or an HTML login/error page saved as .pdf is failure. Report an unexpected format and retain the PDF preference on retry; do not delete or rename a blocked/temporary download to force completion.
 5. Batch only specifically requested records; verify selected identities/count and the chosen PDF format, obey the displayed batch limit and collect per-item status. If the batch control only offers CAJ or its format is unclear, use individual verified PDF controls instead. Report remaining unavailable items without substituting CAJ.
 6. Return the absolute date-folder link and confirmed local file links, plus blocked/failed items and reasons. Only count a file as saved when it has been verified in that folder. If the runtime cannot inspect the saved file, say “download initiated, file not verified.”
-7. Do not upload full texts to GitHub, Zotero or another service unless separately requested. Zotero import is optional and requires available connector support; this package does not transfer authenticated browser cookies.
+7. Do not upload full texts to GitHub, Zotero or another service unless separately requested. Zotero import is optional and requires the local Zotero MCP or, when MCP is unavailable before a write, the Connector fallback; this package does not transfer authenticated browser cookies.
 
 ## Local destination — create first
 
@@ -22,8 +22,9 @@ First read [Chrome permissions and paced downloads](../downloads.md). For this a
 - Use a documented per-download or per-session destination setting when available.
   Do not invent browser APIs or change global browser preferences. Site-specific permission changes follow ../downloads.md. If the browser
   only saves to its default directory, use the exact completed-download receipt
-  to identify each task-owned file, then move it into the date folder and verify
-  it there. Never sweep the Downloads directory or move unrelated files.
+  to identify each task-owned file, then copy it into the date folder without
+  overwriting and verify it there, retaining the original by default. Never
+  sweep the Downloads directory or move unrelated files.
 - Keep a useful title/author filename when possible, sanitize filesystem-invalid
   characters, and retain `.pdf` only for confirmed PDFs. Never overwrite an
   existing file: reuse a verified identical paper or append a unique suffix.
@@ -45,6 +46,22 @@ First read [Chrome permissions and paced downloads](../downloads.md). For this a
   2–5 seconds if supported), stop immediately on completion, and verify once.
   A changing byte count or transfer status is progress; a repeated screenshot is
   not. Do not repeatedly parse a partially downloaded file.
+- A missing source-page/popup download event is not proof of transfer failure.
+  Before retrying, inspect the current task's transfer in the browser download
+  manager or a documented receipt. Recover a completed file only from its exact
+  observed path, check its bytes/content and paper identity, then copy it to the
+  destination and record the hash. An extensionless completed artifact can be a
+  PDF; unrelated history or “the newest file” is not sufficient identity evidence.
+  If its completion/path cannot be established, keep it unverified without
+  triggering another download automatically. Browser safety prompts follow
+  ../downloads.md; a stable temporary file is not permission to bypass them.
+- If Chrome still reports an HTTP/insecure-content block after environment setup,
+  recheck the recorded campus exception and actual warning in ../downloads.md: open
+  `chrome://settings/content/insecureContent`, add `[*.]htu.edu.cn` under
+  “允许显示不安全内容”, then check the existing transfer before any retry.
+  If the tool cannot access the settings page, provide the exact manual steps;
+  a user-confirmed setting is distinct from a tool-observed setting and a
+  verified completed PDF.
 - If there is no observed progress for 60 seconds, inspect the current transfer
   and visible page once for a login, CAPTCHA, access or network error. Do not
   reclick an active download. Retry only a confirmed failed transfer, at most

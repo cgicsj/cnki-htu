@@ -11,4 +11,4 @@
 4. The converter is offline and refuses incomplete author lists, conflicting duplicate metadata and unsupported record types. Resolve those from the source; do not weaken validation to force an export.
 5. Validate the resulting file with an independent BibTeX parser when available, count unique entries, compare titles/DOIs/authors to the source and test Chinese names/special characters. The converter's successful exit alone is not an import test.
 6. Deliver the .bib file and conversion provenance/warnings. Missing year/volume/pages remain omitted. If only a formatted GB/T reference is available, verify individual fields against the detail page before forming JSON; do not regex-guess all metadata from prose.
-7. When Zotero is requested, read [Zotero push](../zotero.md) and use the bundled local receipt client with verified metadata and optional local PDFs. Do not transfer cookies or request direct remote PDF downloads.
+7. When Zotero is requested, read [Zotero push](../zotero.md) and use the bundled local receipt client, which prefers Zotero MCP, with verified metadata and optional local PDFs. Do not transfer cookies or request direct remote PDF downloads.

@@ -122,7 +122,13 @@ python3 /path/to/workflow.py --task /local/research/task.sqlite mark --id cnki:S
 Only pending eligible stages can be claimed. After an interruption, a running
 stage is deliberately not reset automatically. Recover a completed transfer from
 its receipt and verify its file before marking done. `queue`/`export` revalidate
-artifact hashes; missing/changed files become pending. The ledger stores no browser
+artifact hashes and download PDF framing; missing/changed/invalid files become pending.
+Download completion requires a non-temporary filename, `%PDF-` header and `%%EOF`
+within the final 4096 bytes. This lightweight check does not validate PDF structure
+or the paper's identity; open/read the document before `--identity-verified`.
+Old completed receipts with invalid PDF framing also return to pending on the next
+`queue`/`export`; this does not delete files or launch a new transfer.
+The ledger stores no browser
 session and does not keep a download alive after the browser exits.
 
 ## Export

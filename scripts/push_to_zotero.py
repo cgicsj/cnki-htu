@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Save verified CNKI metadata and local PDFs to the local Zotero Connector.
+"""Save verified CNKI metadata and local PDFs through Zotero MCP when available.
 
 Independent implementation informed by cookjohn/cnki-skills. No CNKI network
 requests, cookies, cloud API keys, or automatic retries after uncertain writes.
@@ -22,6 +22,7 @@ from convert import normalize
 from common import aliases, legacy_identities, merge_metadata, source_url
 
 API = 'http://127.0.0.1:23119/connector/'
+MCP_API = os.environ.get('ZOTERO_MCP_URL', 'http://127.0.0.1:23120/mcp')
 
 
 def digest(value):
@@ -112,6 +113,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Client:
+    transport = 'connector'
+
     def __init__(self):
         # VPN/system HTTP proxy settings must not carry this localhost request elsewhere.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -136,7 +139,264 @@ class Client:
             return status, {'error': 'non_json_response'}
 
 
+class MCPUnavailable(RuntimeError):
+    """The MCP endpoint cannot be initialized before any write is attempted."""
+
+
+class MCPError(RuntimeError):
+    pass
+
+
+def _mcp_value(result):
+    """Unwrap common MCP tool-result shapes into Python data."""
+    if not isinstance(result, dict):
+        return result
+    if result.get('isError'):
+        raise MCPError('Zotero MCP tool returned an error')
+    if 'structuredContent' in result:
+        return result['structuredContent']
+    content = result.get('content')
+    if isinstance(content, list):
+        values = []
+        for part in content:
+            if not isinstance(part, dict) or part.get('type') != 'text':
+                continue
+            value = part.get('text', '')
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                pass
+            values.append(value)
+        if len(values) == 1:
+            return values[0]
+        return values
+    return result
+
+
+class ZoteroMCP:
+    """Small Streamable HTTP MCP client for the locally configured Zotero server."""
+
+    def __init__(self, endpoint=None):
+        from urllib.parse import urlsplit
+        self.endpoint = endpoint or MCP_API
+        parsed = urlsplit(self.endpoint)
+        if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
+            raise MCPUnavailable('Zotero MCP endpoint must be a local HTTP address')
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        self.session_id = None
+        self.protocol_version = '2024-11-05'
+        try:
+            result, headers = self._post({
+                'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+                'params': {'protocolVersion': self.protocol_version, 'capabilities': {},
+                           'clientInfo': {'name': 'cnki-htu', 'version': '1.0'}},
+            }, initialize=True)
+            self.session_id = next((v for k, v in headers.items() if k.lower() == 'mcp-session-id'), None)
+            self.protocol_version = result.get('result', {}).get('protocolVersion', self.protocol_version)
+            if 'error' in result:
+                raise MCPUnavailable('Zotero MCP initialization failed')
+            self._post({'jsonrpc': '2.0', 'method': 'notifications/initialized', 'params': {}})
+            listed = self._post({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})[0]
+            self.tools = {tool['name'] for tool in listed.get('result', {}).get('tools', [])}
+            required = {'get_libraries', 'get_collections', 'write_item', 'add_items_to_collection'}
+            if not required.issubset(self.tools):
+                raise MCPUnavailable('Zotero MCP lacks required library/write tools')
+        except MCPUnavailable:
+            self.close()
+            raise
+        except Exception as exc:
+            self.close()
+            raise MCPUnavailable('Zotero MCP is unavailable: ' + type(exc).__name__) from exc
+
+    def _post(self, payload, initialize=False):
+        headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
+        if self.session_id and not initialize:
+            headers['Mcp-Session-Id'] = self.session_id
+            headers['MCP-Protocol-Version'] = self.protocol_version
+        request = urllib.request.Request(self.endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers)
+        with self.opener.open(request, timeout=20) as response:
+            raw = response.read().decode('utf-8', 'replace')
+            response_headers = dict(response.headers.items())
+        if not raw.strip() and payload.get('method', '').startswith('notifications/'):
+            return {}, response_headers
+        if raw.startswith('event:') or '\ndata:' in raw:
+            data_lines = [line[5:].strip() for line in raw.splitlines() if line.startswith('data:')]
+            raw = data_lines[-1] if data_lines else '{}'
+        try:
+            return json.loads(raw), response_headers
+        except ValueError as exc:
+            raise MCPError('Zotero MCP returned a non-JSON response') from exc
+
+    def call(self, name, arguments=None):
+        if name not in self.tools:
+            raise MCPError('Zotero MCP tool is unavailable: ' + name)
+        response, _ = self._post({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call',
+                                  'params': {'name': name, 'arguments': arguments or {}}})
+        if 'error' in response:
+            raise MCPError('Zotero MCP call failed: ' + name)
+        value = _mcp_value(response.get('result', {}))
+        if isinstance(value, dict) and (value.get('success') is False or value.get('error')):
+            raise MCPError('Zotero MCP tool reported failure: ' + name)
+        if isinstance(value, str) and value.lstrip().lower().startswith(('error:', 'failed:')):
+            raise MCPError('Zotero MCP tool reported failure: ' + name)
+        return value
+
+    def inventory(self):
+        libraries = self.call('get_libraries', {'limit': 500})
+        if not isinstance(libraries, list):
+            raise MCPError('Zotero MCP returned an invalid library list')
+        targets = []
+        for library in libraries:
+            library_id = int(library['libraryID'])
+            targets.append({'target': 'L' + str(library_id), 'libraryID': library_id,
+                            'name': library.get('name', ''), 'type': 'library'})
+            collections = self.call('get_collections', {'libraryID': library_id, 'recursive': True})
+            def flatten(rows):
+                for row in rows if isinstance(rows, list) else []:
+                    if not isinstance(row, dict):
+                        continue
+                    targets.append({'target': f'M{library_id}:{row["key"]}', 'libraryID': library_id,
+                                    'collectionKey': row['key'], 'name': row.get('name', ''),
+                                    'path': row.get('path', row.get('name', '')), 'type': 'collection'})
+                    flatten(row.get('subcollections', []))
+            flatten(collections)
+        return libraries, targets
+
+    def close(self):
+        if not self.session_id:
+            return
+        request = urllib.request.Request(self.endpoint, method='DELETE', headers={
+            'Mcp-Session-Id': self.session_id, 'MCP-Protocol-Version': self.protocol_version})
+        try:
+            with self.opener.open(request, timeout=2):
+                pass
+        except Exception:
+            pass
+
+
+def _returned_key(value):
+    if isinstance(value, dict):
+        for field in ('itemKey', 'key'):
+            candidate = value.get(field)
+            if isinstance(candidate, str) and re.fullmatch(r'[A-Z0-9]{8}', candidate):
+                return candidate
+        for child in value.values():
+            found = _returned_key(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _returned_key(child)
+            if found:
+                return found
+    elif isinstance(value, str):
+        match = re.search(r'\b[A-Z0-9]{8}\b', value)
+        if match:
+            return match.group(0)
+    return None
+
+
+class MCPAdapter:
+    """Adapt MCP item/attachment tools to the existing receipt-driven push flow."""
+
+    transport = 'zotero-mcp'
+
+    def __init__(self, mcp, expected_target):
+        self.mcp = mcp
+        self.expected_target = expected_target
+        self.connector = Client()
+        self.selection = None
+        self.last_item_key = None
+
+    def resolve_selected(self):
+        if self.selection and not self.expected_target.startswith('C'):
+            return self.expected_target, self.selection
+        libraries, targets = self.mcp.inventory()
+        target = self.expected_target
+        if re.fullmatch(r'M\d+:[A-Z0-9]{8}', target):
+            lib_id_text, collection_key = target[1:].split(':', 1)
+            library_id = int(lib_id_text)
+            matches = [row for row in targets if row.get('libraryID') == library_id and row.get('collectionKey') == collection_key]
+            if len(matches) != 1:
+                raise RuntimeError('MCP target not found; run --list and select a listed target')
+            match = matches[0]
+            self.selection = {'libraryID': library_id, 'name': match['name'], 'collectionKey': collection_key,
+                              'libraryEditable': True, 'filesEditable': True, 'editable': True}
+            return target, self.selection
+        if target.startswith('C'):
+            code, connector_data = self.connector.request('getSelectedCollection')
+            if code != 200 or not isinstance(connector_data, dict):
+                raise RuntimeError('Cannot map the selected Connector collection to Zotero MCP')
+            connector_target = 'C' + str(connector_data['id']) if connector_data.get('id') is not None else 'L' + str(connector_data['libraryID'])
+            if connector_target != target:
+                raise RuntimeError('Zotero selection changed or differs from --expect-target; select ' + target)
+            library_id = int(connector_data['libraryID'])
+            matches = [row for row in targets if row.get('type') == 'collection' and row.get('libraryID') == library_id and row.get('name') == connector_data.get('name')]
+            if len(matches) != 1:
+                raise RuntimeError('Selected collection is ambiguous or missing in Zotero MCP; use its M<libraryID>:<collectionKey> target from --list')
+            match = matches[0]
+            self.selection = dict(connector_data, collectionKey=match['collectionKey'])
+            return target, self.selection
+        if target.startswith('L') and target[1:].isdigit():
+            library_id = int(target[1:])
+            match = next((row for row in libraries if int(row.get('libraryID', -1)) == library_id), None)
+            if not match:
+                raise RuntimeError('Zotero MCP library target not found; run --list')
+            self.selection = {'libraryID': library_id, 'libraryEditable': True, 'filesEditable': True,
+                              'editable': True, 'name': match.get('name', '')}
+            return target, self.selection
+        raise RuntimeError('Unsupported Zotero target; use C<id>, L<libraryID>, or M<libraryID>:<collectionKey>')
+
+    def request(self, endpoint, data=None, blob=None, metadata=None):
+        try:
+            if endpoint == 'saveItems':
+                self.last_item_key = None
+                item = (data or {}).get('items', [{}])[0]
+                target, selection = self.resolve_selected()
+                fields = {key: value for key, value in item.items()
+                          if key not in ('id', 'itemType', 'creators', 'tags', 'attachments') and isinstance(value, str)}
+                result = self.mcp.call('write_item', {
+                    'libraryID': selection['libraryID'], 'action': 'create',
+                    'itemType': item.get('itemType', 'journalArticle'), 'fields': fields,
+                    'creators': item.get('creators', []),
+                    'tags': [tag.get('tag', '') for tag in item.get('tags', []) if isinstance(tag, dict)],
+                })
+                key = _returned_key(result)
+                self.last_item_key = key
+                if not key:
+                    return 0, {'error': 'item_created_but_mcp_key_unconfirmed'}
+                if selection.get('collectionKey'):
+                    self.mcp.call('add_items_to_collection', {
+                        'libraryID': selection['libraryID'], 'collectionKey': selection['collectionKey'], 'itemKeys': [key]})
+                return 201, {'itemKey': key, 'target': target}
+            if endpoint.startswith('saveAttachment?'):
+                if not metadata or not metadata.get('parentItemID'):
+                    return 400, {'error': 'missing_parent_item_key'}
+                path = Path(metadata.get('path', '')).expanduser()
+                if not path.is_absolute() or not path.is_file() or path.is_symlink():
+                    return 400, {'error': 'invalid_local_pdf_path'}
+                sha = hashlib.sha256(path.read_bytes()).hexdigest()
+                if sha != metadata.get('sha256'):
+                    return 400, {'error': 'local_pdf_changed_before_mcp_import'}
+                # The receipt stores the MCP key in parentItemID for this adapter.
+                self.mcp.call('write_item', {
+                    'libraryID': self.resolve_selected()[1]['libraryID'], 'action': 'import',
+                    'filePath': str(path),
+                    'parentItemKey': metadata['parentItemID'], 'title': metadata.get('title', 'Full Text PDF')})
+                return 201, {}
+        except Exception as exc:
+            return 0, {'error': 'mcp_write_result_uncertain', 'detail': str(exc)}
+        return 400, {'error': 'unsupported_connector_operation'}
+
+
 def selected(client, expected=None):
+    if isinstance(client, MCPAdapter):
+        target, data = client.resolve_selected()
+        if not data.get('libraryEditable') or data.get('editable') is False:
+            raise RuntimeError('Selected Zotero library/collection is not writable')
+        if expected and target != expected:
+            raise RuntimeError('Zotero selection changed or differs from --expect-target; select ' + expected)
+        return target, data
     code, data = client.request('getSelectedCollection')
     if code != 200 or not isinstance(data, dict) or 'libraryID' not in data:
         raise RuntimeError('Cannot read Zotero target; start desktop Zotero and enable local Connector access')
@@ -243,7 +503,7 @@ def push(papers, state_path, expected_target, client=None):
             if row is None:
                 row = {'aliases': paper['aliases'], 'fingerprint': paper['fingerprint'], 'target': target,
                        'session': uuid.uuid4().hex, 'item_id': uuid.uuid4().hex,
-                       'metadata': 'pending', 'pdf': 'pending', 'pdf_sha256': None}
+                       'metadata': 'pending', 'pdf': 'pending', 'pdf_sha256': None, 'mcp_item_key': None}
                 state['records'][key] = row
             if row['metadata'] in ('sending', 'uncertain'):
                 results.append({'key': key, 'status': 'uncertain', 'reason': 'Check Zotero before resolving an uncertain metadata write'})
@@ -253,13 +513,15 @@ def push(papers, state_path, expected_target, client=None):
                 row['metadata'] = 'sending'
                 commit()
                 item = dict(paper['item'], id=row['item_id'])
-                code, _ = client.request('saveItems', {'sessionID': row['session'], 'uri': item.get('url', ''), 'items': [item]})
+                code, reply = client.request('saveItems', {'sessionID': row['session'], 'uri': item.get('url', ''), 'items': [item]})
+                if getattr(client, 'transport', '') == 'zotero-mcp' and client.last_item_key:
+                    row['mcp_item_key'] = client.last_item_key
                 row['metadata'] = 'saved' if code == 201 else 'uncertain'
                 row['last_metadata_http'] = code
                 commit()
                 if code != 201:
                     results.append({'key': key, 'status': 'uncertain', 'http': code,
-                                    'reason': 'No confirmed save receipt; 409 is not library deduplication'})
+                                    'reason': (reply.get('detail') or reply.get('error')) if isinstance(reply, dict) and (reply.get('detail') or reply.get('error')) else 'No confirmed save receipt; 409 is not library deduplication'})
                     continue
                 try:
                     selected(client, target)
@@ -269,8 +531,16 @@ def push(papers, state_path, expected_target, client=None):
                     raise
             pdf = paper['pdf']
             if pdf:
+                if getattr(client, 'transport', '') == 'zotero-mcp' and not row.get('mcp_item_key'):
+                    results.append({'key': key, 'status': 'blocked', 'metadata': 'saved',
+                                    'reason': 'This receipt predates Zotero MCP item keys; rerun explicitly with --transport connector or reconcile the existing item first'})
+                    continue
                 if row['pdf_sha256'] and row['pdf_sha256'] != pdf['sha256']:
                     results.append({'key': key, 'status': 'blocked', 'reason': 'PDF changed; check the existing attachment'})
+                    continue
+                if row['pdf'] == 'blocked':
+                    results.append({'key': key, 'status': 'blocked', 'metadata': 'saved',
+                                    'reason': 'Resolve the rejected attachment after checking Zotero; do not resend automatically'})
                     continue
                 if row['pdf'] in ('sending', 'uncertain'):
                     results.append({'key': key, 'status': 'uncertain', 'metadata': 'saved', 'reason': 'Check the attachment before retrying'})
@@ -279,14 +549,18 @@ def push(papers, state_path, expected_target, client=None):
                     _, col = selected(client, target)
                     if not col.get('filesEditable', False):
                         raise RuntimeError('Target no longer supports file attachments')
-                    pdf_bytes = Path(pdf['path']).read_bytes()
-                    if hashlib.sha256(pdf_bytes).hexdigest() != pdf['sha256']:
-                        raise ValueError('PDF changed after input validation; re-open and verify the file')
+                    pdf_bytes = None
+                    if getattr(client, 'transport', '') != 'zotero-mcp':
+                        pdf_bytes = Path(pdf['path']).read_bytes()
+                        if hashlib.sha256(pdf_bytes).hexdigest() != pdf['sha256']:
+                            raise ValueError('PDF changed after input validation; re-open and verify the file')
                     row.update(pdf='sending', pdf_sha256=pdf['sha256'])
                     commit()
                     url = paper['item'].get('url') or pdf_path_uri(pdf['path'])
                     code, reply = client.request('saveAttachment?sessionID=' + row['session'], blob=pdf_bytes,
-                                                metadata={'parentItemID': row['item_id'], 'title': 'Full Text PDF', 'url': url})
+                                                metadata={'parentItemID': row.get('mcp_item_key') if getattr(client, 'transport', '') == 'zotero-mcp' else row['item_id'],
+                                                          'path': pdf['path'], 'sha256': pdf['sha256'],
+                                                          'title': 'Full Text PDF', 'url': url})
                     # Only explicit session/permission rejection is safe to retry after resolving its cause.
                     rejected = code == 200 or (code == 400 and isinstance(reply, dict) and reply.get('error') == 'SESSION_NOT_FOUND')
                     row['pdf'] = 'saved' if code == 201 else ('blocked' if rejected else 'uncertain')
@@ -297,7 +571,8 @@ def push(papers, state_path, expected_target, client=None):
                                     'reason': 'PDF not saved; if session expired, attach locally to the existing Zotero item'})
                     continue
             results.append({'key': key, 'status': 'saved', 'metadata': 'saved', 'pdf': 'saved' if pdf else 'not_requested'})
-    return {'target': target, 'results': results, 'complete': all(r['status'] == 'saved' for r in results)}
+    return {'transport': getattr(client, 'transport', 'connector'), 'target': target,
+            'results': results, 'complete': all(r['status'] == 'saved' for r in results)}
 
 
 def pdf_path_uri(path):
@@ -317,22 +592,56 @@ def resolve(state_path, key, stage, outcome, note):
         commit()
 
 
+def mcp_listing(mcp):
+    libraries, targets = mcp.inventory()
+    result = {'transport': 'zotero-mcp', 'libraries': libraries, 'targets': targets}
+    code, current = Client().request('getSelectedCollection')
+    if code == 200 and isinstance(current, dict) and current.get('libraryID') is not None:
+        legacy = 'C' + str(current['id']) if current.get('id') is not None else 'L' + str(current['libraryID'])
+        result['target'] = legacy
+        result['selected'] = current
+        if current.get('id') is not None:
+            matches = [row for row in targets if row.get('type') == 'collection'
+                       and row.get('libraryID') == int(current['libraryID']) and row.get('name') == current.get('name')]
+            if len(matches) == 1:
+                result['mcpTarget'] = matches[0]['target']
+            else:
+                result['targetMapping'] = 'ambiguous_or_missing; use a listed M<libraryID>:<collectionKey> target'
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', nargs='?', help='UTF-8 JSON paper object or array')
-    parser.add_argument('--list', action='store_true', help='Read selected target and available collections')
+    parser.add_argument('--list', action='store_true', help='Read Zotero libraries and collections (MCP first)')
+    parser.add_argument('--transport', choices=['auto', 'mcp', 'connector'], default='auto',
+                        help='Prefer Zotero MCP; auto falls back to Connector only if MCP is unavailable before a write')
     parser.add_argument('--state', type=Path, help='Persistent receipt JSON outside the source repository')
-    parser.add_argument('--expect-target', help='Observed C<collectionID> or L<libraryID> from --list')
+    parser.add_argument('--expect-target', help='Target from --list: C<id>, L<libraryID>, or M<libraryID>:<collectionKey>')
     parser.add_argument('--dry-run', action='store_true', help='Validate input locally without contacting Zotero')
     parser.add_argument('--resolve', metavar='RECORD_KEY', help='Reconcile only after checking the real Zotero item')
     parser.add_argument('--stage', choices=['metadata', 'pdf'])
     parser.add_argument('--outcome', choices=['saved', 'not-saved'])
     parser.add_argument('--note', help='Evidence from manual Zotero verification')
     args = parser.parse_args()
+    mcp = None
     try:
         if args.list:
+            if args.transport != 'connector':
+                try:
+                    mcp = ZoteroMCP()
+                    listing = mcp_listing(mcp)
+                except (MCPUnavailable, MCPError, OSError, RuntimeError):
+                    if mcp:
+                        mcp.close()
+                        mcp = None
+                    if args.transport == 'mcp':
+                        raise
+                if mcp:
+                    print(json.dumps(listing, ensure_ascii=False, indent=2))
+                    return 0
             target, data = selected(Client())
-            print(json.dumps({'target': target, **data}, ensure_ascii=False, indent=2))
+            print(json.dumps({'transport': 'connector', 'target': target, **data}, ensure_ascii=False, indent=2))
             return 0
         if args.resolve:
             if not (args.state and args.stage and args.outcome and args.note):
@@ -352,12 +661,25 @@ def main():
             return 0
         if not (args.state and args.expect_target):
             parser.error('Push requires --state and --expect-target from --list')
-        result = push(papers, args.state, args.expect_target)
+        client = None
+        if args.transport != 'connector':
+            try:
+                mcp = ZoteroMCP()
+                client = MCPAdapter(mcp, args.expect_target)
+            except MCPUnavailable:
+                if args.transport == 'mcp':
+                    raise
+        if client is None:
+            client = Client()
+        result = push(papers, args.state, args.expect_target, client=client)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result['complete'] else 2
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
         print(json.dumps({'error': str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
+    finally:
+        if mcp:
+            mcp.close()
 
 
 if __name__ == '__main__':
