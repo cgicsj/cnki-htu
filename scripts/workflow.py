@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
-from common import source_url, aliases, merge_metadata, evidence_source
+from common import validate_record, source_url, aliases, merge_metadata, evidence_source
 from xml.sax.saxutils import escape
 import zipfile
 
@@ -78,20 +78,24 @@ def init(path, config):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('xb'):
         pass
-    db = sqlite3.connect(str(path))
     try:
-        with db:
-            db.executescript('''
+        db = sqlite3.connect(str(path))
+        try:
+            with db:
+                db.executescript('''
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE papers (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, screening TEXT, extraction TEXT);
 CREATE TABLE stages (paper_id TEXT REFERENCES papers(id), stage TEXT, status TEXT NOT NULL,
  reason TEXT NOT NULL DEFAULT '', artifact TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(paper_id,stage));
 CREATE TABLE events (id INTEGER PRIMARY KEY, at TEXT, paper_id TEXT, action TEXT, detail TEXT);
 ''')
-            config = dict(config, stages=stages, created_at=now())
-            db.executemany('INSERT INTO meta VALUES (?,?)', [('schema_version', '1'), ('config', dump(config))])
-    finally:
-        db.close()
+                config = dict(config, stages=stages, created_at=now())
+                db.executemany('INSERT INTO meta VALUES (?,?)', [('schema_version', '1'), ('config', dump(config))])
+        finally:
+            db.close()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     return {'task': str(path.resolve()), 'stages': stages}
 
 
@@ -149,6 +153,7 @@ def import_records(db, records):
             raise ValueError('Each record must be an object')
         for key in ('title', 'url', 'retrieved_at'):
             required(rec.get(key), key)
+        validate_record(rec)
         keys = aliases(rec)
         candidates = set().union(*(index.get(key, set()) for key in keys))
         if len(candidates) > 1:
@@ -291,6 +296,19 @@ def mark(db, pid, name, status, reason='', path=None, identity_verified=False):
     return {'id': pid, 'stage': name, 'status': status}
 
 
+def reset(db, pid, name, reason):
+    current = stage(db, pid, name)
+    if current['status'] != 'done':
+        raise ValueError('Only a completed stage can be reset')
+    if name not in ('download', 'citation'):
+        raise ValueError('Reset is only available for download or citation stages; update evidence with screen/extract')
+    required(reason, 'reason')
+    previous = json.loads(current['artifact']) if current['artifact'] else None
+    set_stage(db, pid, name, 'pending', reason)
+    event(db, pid, name + ':reset', {'reason': reason, 'previous_artifact': previous})
+    return {'id': pid, 'stage': name, 'status': 'pending'}
+
+
 def inspect_artifacts(db):
     """Read/hash files without acquiring a SQLite write lock."""
     invalid = []
@@ -334,15 +352,18 @@ def tables(db):
     screening = [['文献ID', '原始序号', '题名', '作者', '年份', '来源', '链接', '摘要', '筛选结论', '理由', '判断依据', '证据', '可访问层级', '筛选标准']]
     evidence = [['文献ID', '题名', '链接', '可访问层级'] + list(FIELDS.values())]
     sources = [['文献ID', '题名', '字段', '提取内容', '原文证据', '证据位置', '证据来源']]
+    criteria = config(db)['criteria']
     for row in db.execute('SELECT * FROM papers ORDER BY rowid'):
         m = json.loads(row['metadata'])
         s = json.loads(row['screening']) if row['screening'] else {}
-        authors = m.get('authors', '')
+        authors = m.get('authors')
         if isinstance(authors, list):
             authors = '；'.join(authors)
+        elif authors is None:
+            authors = ''
         if m.get('authors_complete') is False:
             authors = str(authors) + '（作者列表不完整）'
-        screening.append([row['id'], m.get('site_rank', ''), m['title'], authors, m.get('year', ''), m.get('source', m.get('journal', '')), m['url'], m.get('abstract', ''), DECISIONS.get(s.get('decision'), '未筛选'), s.get('reason', ''), s.get('basis', ''), s.get('evidence', ''), s.get('access_level', m.get('access_level', 'metadata_only')), config(db)['criteria']])
+        screening.append([row['id'], m.get('site_rank') or '', m['title'], authors, m.get('year') or '', m.get('source') or m.get('journal') or '', m['url'], m.get('abstract') or '', DECISIONS.get(s.get('decision'), '未筛选'), s.get('reason', ''), s.get('basis', ''), s.get('evidence', ''), s.get('access_level', m.get('access_level', 'metadata_only')), criteria])
         if s.get('decision') != 'include':
             continue
         e = json.loads(row['extraction']) if row['extraction'] else {}
@@ -362,7 +383,7 @@ def tables(db):
 
 
 def xml_text(value):
-    text = str(value)
+    text = '' if value is None else str(value)
     if len(text) > 32767:
         raise ValueError('Excel cell exceeds 32767 characters; shorten evidence quote before export')
     if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]', text):
@@ -389,11 +410,14 @@ def write_xlsx(path, sheets):
         z.writestr('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + ''.join('<Relationship Id="rId%d" Type="%s/worksheet" Target="worksheets/sheet%d.xml"/>' % (i, rel, i) for i in range(1, len(sheets) + 1)) + '<Relationship Id="styles" Type="' + rel + '/styles" Target="styles.xml"/></Relationships>')
         z.writestr('xl/styles.xml', '<styleSheet xmlns="' + ns + '"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF24476B"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
         for i, rows in enumerate(sheets.values(), 1):
+            if not rows:
+                rows = [['']]
+            width = max(1, max(len(row) for row in rows))
             body = []
             for n, row in enumerate(rows, 1):
                 cells = ''.join('<c r="%s%d" s="%d" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>' % (column(c), n, int(n == 1), xml_text(v)) for c, v in enumerate(row, 1))
                 body.append('<row r="%d">%s</row>' % (n, cells))
-            z.writestr('xl/worksheets/sheet%d.xml' % i, '<worksheet xmlns="' + ns + '"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="%d" width="28" customWidth="1"/></cols><sheetData>' % len(rows[0]) + ''.join(body) + '</sheetData><autoFilter ref="A1:%s%d"/></worksheet>' % (column(len(rows[0])), len(rows)))
+            z.writestr('xl/worksheets/sheet%d.xml' % i, '<worksheet xmlns="' + ns + '"><dimension ref="A1:%s%d"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="%d" width="28" customWidth="1"/></cols><sheetData>' % (column(width), len(rows), width) + ''.join(body) + '</sheetData><autoFilter ref="A1:%s%d"/></worksheet>' % (column(width), len(rows)))
 
 
 def export(db, directory, checked=None):
@@ -414,14 +438,17 @@ def export(db, directory, checked=None):
         (temp / 'task-snapshot.json').write_text(dump(snapshot), encoding='utf-8')
         # Cooperative exporters serialize publication; never replace an output.
         lock = dest.with_name(dest.name + '.publish.lock')
-        with lock.open('x'):
-            pass
+        try:
+            with lock.open('x'):
+                pass
+        except FileExistsError:
+            raise FileExistsError('Export lock exists: ' + str(lock) + '; confirm no active export before removing it') from None
         try:
             if dest.exists():
                 raise FileExistsError('Choose a new output folder; exports never overwrite')
             temp.rename(dest)
         finally:
-            lock.unlink()
+            lock.unlink(missing_ok=True)
     return {'directory': str(dest.resolve()), 'workbook': str((dest / '研究工作表.xlsx').resolve()), 'papers': len(data['文献筛选表']) - 1}
 
 
@@ -437,6 +464,9 @@ def main(argv=None):
     p.add_argument('--id', required=True); p.add_argument('--stage', choices=STAGES, required=True)
     p.add_argument('--status', choices=('pending', 'running', 'blocked', 'failed', 'done'), required=True)
     p.add_argument('--reason', default=''); p.add_argument('--artifact'); p.add_argument('--identity-verified', action='store_true')
+    p = sub.add_parser('reset')
+    p.add_argument('--id', required=True); p.add_argument('--stage', choices=('download', 'citation'), required=True)
+    p.add_argument('--reason', required=True)
     sub.add_parser('queue'); sub.add_parser('status')
     p = sub.add_parser('export'); p.add_argument('--output', required=True)
     args = parser.parse_args(argv)
@@ -456,6 +486,7 @@ def main(argv=None):
                     elif args.command == 'screen': result = screen(db, args.id, value)
                     elif args.command == 'extract': result = extract(db, args.id, value)
                     elif args.command == 'mark': result = mark(db, args.id, args.stage, args.status, args.reason, args.artifact, args.identity_verified)
+                    elif args.command == 'reset': result = reset(db, args.id, args.stage, args.reason)
                     elif args.command == 'queue': result = queue(db, checked)
                     elif args.command == 'status': result = status(db)
                     else: result = export(db, args.output, checked)

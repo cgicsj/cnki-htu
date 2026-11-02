@@ -147,6 +147,25 @@ class MCPError(RuntimeError):
     pass
 
 
+def _permission(value):
+    """Return an explicit MCP permission flag, or None when it is unknown."""
+    return value if isinstance(value, bool) else None
+
+
+def _sse_messages(raw):
+    """Collect SSE data fields per event, joining multi-line payloads."""
+    messages, data = [], []
+    for line in raw.splitlines():
+        if line.startswith('data:'):
+            data.append(line[5:].lstrip())
+        elif not line.strip() and data:
+            messages.append('\n'.join(data))
+            data = []
+    if data:
+        messages.append('\n'.join(data))
+    return messages
+
+
 def _mcp_value(result):
     """Unwrap common MCP tool-result shapes into Python data."""
     if not isinstance(result, dict):
@@ -185,6 +204,7 @@ class ZoteroMCP:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.session_id = None
         self.protocol_version = '2024-11-05'
+        self._inventory = None
         try:
             result, headers = self._post({
                 'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
@@ -219,9 +239,23 @@ class ZoteroMCP:
             response_headers = dict(response.headers.items())
         if not raw.strip() and payload.get('method', '').startswith('notifications/'):
             return {}, response_headers
-        if raw.startswith('event:') or '\ndata:' in raw:
-            data_lines = [line[5:].strip() for line in raw.splitlines() if line.startswith('data:')]
-            raw = data_lines[-1] if data_lines else '{}'
+        messages = _sse_messages(raw)
+        if messages:
+            parsed = []
+            for message in messages:
+                try:
+                    parsed.append(json.loads(message))
+                except ValueError:
+                    continue
+            if not parsed:
+                raise MCPError('Zotero MCP returned a non-JSON SSE response')
+            for item in parsed:
+                if item.get('id') == payload.get('id') and ('result' in item or 'error' in item):
+                    return item, response_headers
+            for item in reversed(parsed):
+                if 'result' in item or 'error' in item:
+                    return item, response_headers
+            return parsed[-1], response_headers
         try:
             return json.loads(raw), response_headers
         except ValueError as exc:
@@ -241,26 +275,57 @@ class ZoteroMCP:
             raise MCPError('Zotero MCP tool reported failure: ' + name)
         return value
 
-    def inventory(self):
+    def inventory(self, refresh=False):
+        if not refresh and getattr(self, '_inventory', None) is not None:
+            return self._inventory
         libraries = self.call('get_libraries', {'limit': 500})
         if not isinstance(libraries, list):
             raise MCPError('Zotero MCP returned an invalid library list')
-        targets = []
+        enriched, targets = [], []
         for library in libraries:
+            if not isinstance(library, dict) or library.get('libraryID') is None:
+                raise MCPError('Zotero MCP returned an invalid library record')
             library_id = int(library['libraryID'])
+            library_type = str(library.get('libraryType', '')).lower()
+            library_editable = _permission(library.get('libraryEditable'))
+            if library_editable is None:
+                library_editable = _permission(library.get('editable'))
+            files_editable = _permission(library.get('filesEditable'))
+            if library_type == 'feed':
+                library_editable = False
+                files_editable = False
+            if library_editable is None and library_type == 'user':
+                library_editable = True
+            if files_editable is None and library_type == 'user':
+                files_editable = True
+            enriched.append(dict(library, libraryEditable=library_editable,
+                                 filesEditable=files_editable))
             targets.append({'target': 'L' + str(library_id), 'libraryID': library_id,
-                            'name': library.get('name', ''), 'type': 'library'})
+                            'name': library.get('name', ''), 'type': 'library',
+                            'libraryType': library_type,
+                            'libraryEditable': library_editable, 'filesEditable': files_editable})
             collections = self.call('get_collections', {'libraryID': library_id, 'recursive': True})
             def flatten(rows):
                 for row in rows if isinstance(rows, list) else []:
-                    if not isinstance(row, dict):
+                    if not isinstance(row, dict) or not row.get('key'):
                         continue
+                    collection_editable = _permission(row.get('libraryEditable'))
+                    if collection_editable is None:
+                        collection_editable = _permission(row.get('editable'))
+                    if collection_editable is None:
+                        collection_editable = library_editable
+                    collection_files = _permission(row.get('filesEditable'))
+                    if collection_files is None:
+                        collection_files = files_editable
                     targets.append({'target': f'M{library_id}:{row["key"]}', 'libraryID': library_id,
                                     'collectionKey': row['key'], 'name': row.get('name', ''),
-                                    'path': row.get('path', row.get('name', '')), 'type': 'collection'})
+                                    'path': row.get('path', row.get('name', '')), 'type': 'collection',
+                                    'libraryType': library_type, 'libraryEditable': collection_editable,
+                                    'filesEditable': collection_files})
                     flatten(row.get('subcollections', []))
             flatten(collections)
-        return libraries, targets
+        self._inventory = (enriched, targets)
+        return self._inventory
 
     def close(self):
         if not self.session_id:
@@ -272,6 +337,24 @@ class ZoteroMCP:
                 pass
         except Exception:
             pass
+
+
+def _attachment_key(value):
+    """Find only an explicit attachmentKey; parent item keys are not evidence."""
+    if isinstance(value, dict):
+        candidate = value.get('attachmentKey')
+        if isinstance(candidate, str) and re.fullmatch(r'[A-Z0-9]{8}', candidate):
+            return candidate
+        for child in value.values():
+            found = _attachment_key(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _attachment_key(child)
+            if found:
+                return found
+    return None
 
 
 def _returned_key(value):
@@ -289,10 +372,6 @@ def _returned_key(value):
             found = _returned_key(child)
             if found:
                 return found
-    elif isinstance(value, str):
-        match = re.search(r'\b[A-Z0-9]{8}\b', value)
-        if match:
-            return match.group(0)
     return None
 
 
@@ -307,6 +386,7 @@ class MCPAdapter:
         self.connector = Client()
         self.selection = None
         self.last_item_key = None
+        self.last_attachment_key = None
 
     def resolve_selected(self):
         if self.selection and not self.expected_target.startswith('C'):
@@ -321,7 +401,10 @@ class MCPAdapter:
                 raise RuntimeError('MCP target not found; run --list and select a listed target')
             match = matches[0]
             self.selection = {'libraryID': library_id, 'name': match['name'], 'collectionKey': collection_key,
-                              'libraryEditable': True, 'filesEditable': True, 'editable': True}
+                              'libraryEditable': match.get('libraryEditable'),
+                              'filesEditable': match.get('filesEditable'),
+                              'editable': match.get('libraryEditable'),
+                              'canonicalTarget': target}
             return target, self.selection
         if target.startswith('C'):
             code, connector_data = self.connector.request('getSelectedCollection')
@@ -335,15 +418,21 @@ class MCPAdapter:
             if len(matches) != 1:
                 raise RuntimeError('Selected collection is ambiguous or missing in Zotero MCP; use its M<libraryID>:<collectionKey> target from --list')
             match = matches[0]
-            self.selection = dict(connector_data, collectionKey=match['collectionKey'])
+            canonical_target = f'M{library_id}:{match["collectionKey"]}'
+            self.selection = dict(connector_data, collectionKey=match['collectionKey'],
+                                  canonicalTarget=canonical_target)
             return target, self.selection
         if target.startswith('L') and target[1:].isdigit():
             library_id = int(target[1:])
             match = next((row for row in libraries if int(row.get('libraryID', -1)) == library_id), None)
             if not match:
                 raise RuntimeError('Zotero MCP library target not found; run --list')
-            self.selection = {'libraryID': library_id, 'libraryEditable': True, 'filesEditable': True,
-                              'editable': True, 'name': match.get('name', '')}
+            self.selection = {'libraryID': library_id,
+                              'libraryEditable': match.get('libraryEditable'),
+                              'filesEditable': match.get('filesEditable'),
+                              'editable': match.get('libraryEditable'),
+                              'name': match.get('name', ''),
+                              'canonicalTarget': target}
             return target, self.selection
         raise RuntimeError('Unsupported Zotero target; use C<id>, L<libraryID>, or M<libraryID>:<collectionKey>')
 
@@ -370,6 +459,7 @@ class MCPAdapter:
                         'libraryID': selection['libraryID'], 'collectionKey': selection['collectionKey'], 'itemKeys': [key]})
                 return 201, {'itemKey': key, 'target': target}
             if endpoint.startswith('saveAttachment?'):
+                self.last_attachment_key = None
                 if not metadata or not metadata.get('parentItemID'):
                     return 400, {'error': 'missing_parent_item_key'}
                 path = Path(metadata.get('path', '')).expanduser()
@@ -379,11 +469,15 @@ class MCPAdapter:
                 if sha != metadata.get('sha256'):
                     return 400, {'error': 'local_pdf_changed_before_mcp_import'}
                 # The receipt stores the MCP key in parentItemID for this adapter.
-                self.mcp.call('write_item', {
+                result = self.mcp.call('write_item', {
                     'libraryID': self.resolve_selected()[1]['libraryID'], 'action': 'import',
                     'filePath': str(path),
                     'parentItemKey': metadata['parentItemID'], 'title': metadata.get('title', 'Full Text PDF')})
-                return 201, {}
+                key = _attachment_key(result)
+                self.last_attachment_key = key
+                if not key:
+                    return 0, {'error': 'attachment_created_but_mcp_key_unconfirmed'}
+                return 201, {'attachmentKey': key}
         except Exception as exc:
             return 0, {'error': 'mcp_write_result_uncertain', 'detail': str(exc)}
         return 400, {'error': 'unsupported_connector_operation'}
@@ -392,7 +486,7 @@ class MCPAdapter:
 def selected(client, expected=None):
     if isinstance(client, MCPAdapter):
         target, data = client.resolve_selected()
-        if not data.get('libraryEditable') or data.get('editable') is False:
+        if data.get('libraryEditable') is False or data.get('editable') is False:
             raise RuntimeError('Selected Zotero library/collection is not writable')
         if expected and target != expected:
             raise RuntimeError('Zotero selection changed or differs from --expect-target; select ' + expected)
@@ -437,7 +531,7 @@ def locked_state(path):
                     temporary.unlink()
         yield state, commit
     finally:
-        lock.unlink()
+        lock.unlink(missing_ok=True)
 
 
 def push(papers, state_path, expected_target, client=None):
@@ -468,20 +562,28 @@ def push(papers, state_path, expected_target, client=None):
         for alias in paper['aliases']:
             alias_index[alias] = key
     target, collection = selected(client, expected_target)
-    if any(p['pdf'] for p in unique.values()) and not collection.get('filesEditable', False):
-        raise RuntimeError('Target does not support file attachments; no items were written')
+    receipt_target = collection.get('canonicalTarget') or target
+    if any(p['pdf'] for p in unique.values()) and collection.get('filesEditable') is not True:
+        raise RuntimeError('Target does not confirm file-attachment permission; no items were written')
     results = []
     with locked_state(state_path) as (state, commit):
+        receipt_aliases = {}
+        for receipt_key, receipt_row in state['records'].items():
+            for alias in receipt_row.get('aliases') or []:
+                receipt_aliases.setdefault(alias, set()).add(receipt_key)
         for paper in unique.values():
-            key = target + ':' + paper['identity']
+            targets = {target, receipt_target}
+            key = receipt_target + ':' + paper['identity']
             possible = set()
             for candidate in paper['legacy_keys']:
-                candidate_key = target + ':' + candidate
-                if candidate_key in state['records']:
-                    possible.add(candidate_key)
-            for candidate_key, candidate_row in state['records'].items():
-                if candidate_row.get('target') == target and set(candidate_row.get('aliases', [])) & set(paper['aliases']):
-                    possible.add(candidate_key)
+                for receipt in targets:
+                    candidate_key = receipt + ':' + candidate
+                    if candidate_key in state['records']:
+                        possible.add(candidate_key)
+            for alias in paper['aliases']:
+                for candidate_key in receipt_aliases.get(alias, ()):
+                    if state['records'][candidate_key].get('target') in targets:
+                        possible.add(candidate_key)
             if len(possible) > 1:
                 results.append({'key': key, 'status': 'blocked', 'reason': 'Multiple receipts match; reconcile manually'})
                 continue
@@ -501,10 +603,13 @@ def push(papers, state_path, expected_target, client=None):
                 results.append({'key': key, 'status': 'blocked', 'reason': 'Metadata changed; reconcile existing item manually'})
                 continue
             if row is None:
-                row = {'aliases': paper['aliases'], 'fingerprint': paper['fingerprint'], 'target': target,
+                row = {'aliases': paper['aliases'], 'fingerprint': paper['fingerprint'], 'target': receipt_target,
                        'session': uuid.uuid4().hex, 'item_id': uuid.uuid4().hex,
-                       'metadata': 'pending', 'pdf': 'pending', 'pdf_sha256': None, 'mcp_item_key': None}
+                       'metadata': 'pending', 'pdf': 'pending', 'pdf_sha256': None,
+                       'mcp_item_key': None, 'mcp_attachment_key': None}
                 state['records'][key] = row
+            else:
+                row['target'] = receipt_target
             if row['metadata'] in ('sending', 'uncertain'):
                 results.append({'key': key, 'status': 'uncertain', 'reason': 'Check Zotero before resolving an uncertain metadata write'})
                 continue
@@ -547,8 +652,8 @@ def push(papers, state_path, expected_target, client=None):
                     continue
                 if row['pdf'] != 'saved':
                     _, col = selected(client, target)
-                    if not col.get('filesEditable', False):
-                        raise RuntimeError('Target no longer supports file attachments')
+                    if col.get('filesEditable') is not True:
+                        raise RuntimeError('Target no longer confirms file-attachment permission')
                     pdf_bytes = None
                     if getattr(client, 'transport', '') != 'zotero-mcp':
                         pdf_bytes = Path(pdf['path']).read_bytes()
@@ -563,6 +668,8 @@ def push(papers, state_path, expected_target, client=None):
                                                           'title': 'Full Text PDF', 'url': url})
                     # Only explicit session/permission rejection is safe to retry after resolving its cause.
                     rejected = code == 200 or (code == 400 and isinstance(reply, dict) and reply.get('error') == 'SESSION_NOT_FOUND')
+                    if getattr(client, 'transport', '') == 'zotero-mcp' and getattr(client, 'last_attachment_key', None):
+                        row['mcp_attachment_key'] = client.last_attachment_key
                     row['pdf'] = 'saved' if code == 201 else ('blocked' if rejected else 'uncertain')
                     row['last_pdf_http'] = code
                     commit()
@@ -580,13 +687,20 @@ def pdf_path_uri(path):
     return Path(path).as_uri()
 
 
-def resolve(state_path, key, stage, outcome, note):
+def resolve(state_path, key, stage, outcome, note, item_key=None):
+    if item_key is not None:
+        if not isinstance(item_key, str) or not re.fullmatch(r'[A-Z0-9]{8}', item_key):
+            raise ValueError('--item-key must be an 8-character MCP item key')
+        if stage != 'metadata' or outcome != 'saved':
+            raise ValueError('--item-key is only valid with --stage metadata --outcome saved')
     with locked_state(state_path) as (state, commit):
         row = state['records'][key]
         if row[stage] not in ('sending', 'uncertain', 'blocked'):
             raise ValueError('Only an uncertain/blocked write may be manually reconciled')
         row.setdefault('reconciliation', []).append({'stage': stage, 'outcome': outcome, 'note': note})
         row[stage] = 'saved' if outcome == 'saved' else 'pending'
+        if stage == 'metadata' and outcome == 'saved' and item_key:
+            row['mcp_item_key'] = item_key
         if stage == 'metadata' and outcome == 'not-saved':
             row.update(session=uuid.uuid4().hex, item_id=uuid.uuid4().hex, pdf='pending', pdf_sha256=None)
         commit()
@@ -623,6 +737,7 @@ def main():
     parser.add_argument('--stage', choices=['metadata', 'pdf'])
     parser.add_argument('--outcome', choices=['saved', 'not-saved'])
     parser.add_argument('--note', help='Evidence from manual Zotero verification')
+    parser.add_argument('--item-key', help='Confirmed 8-character Zotero MCP item key for --resolve metadata')
     args = parser.parse_args()
     mcp = None
     try:
@@ -646,7 +761,7 @@ def main():
         if args.resolve:
             if not (args.state and args.stage and args.outcome and args.note):
                 parser.error('--resolve requires --state, --stage, --outcome and --note')
-            resolve(args.state, args.resolve, args.stage, args.outcome, args.note)
+            resolve(args.state, args.resolve, args.stage, args.outcome, args.note, args.item_key)
             print(json.dumps({'reconciled': args.resolve}, ensure_ascii=False))
             return 0
         if not args.input:
@@ -675,7 +790,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result['complete'] else 2
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
-        print(json.dumps({'error': str(exc)}, ensure_ascii=False), file=sys.stderr)
+        print(str(exc), file=sys.stderr)
         return 1
     finally:
         if mcp:

@@ -9,6 +9,12 @@ __pycache__/
 *.crdownload
 *.lock
 *.tmp
+# Generated research exports and citation files
+*.xlsx
+*.csv
+*.bib
+report-*/
+
 research/
 reports/
 local-data/

@@ -58,7 +58,7 @@ def parse_tagged(text, kind):
         tags, last = {}, None
     # EndNote exports from CNKI carry extra tags such as %+, %@, %K, %X, %L, %W.
     # Accept any single non-space tag character and ignore tags the record does not use.
-    pattern = r"^([A-Z][A-Z0-9])  -\s?(.*)$" if kind == "ris" else r"^%([^%\s])\s?(.*)$"
+    pattern = r"^([A-Z][A-Z0-9])[ \t]{1,3}-[ \t]?(.*)$" if kind == "ris" else r"^%([^%\s])\s?(.*)$"
     for line in text.splitlines():
         match = re.match(pattern, line)
         if match:
@@ -89,6 +89,9 @@ def normalize(rec):
         raise ValueError("each record must be an object")
     if rec.get("type", "article") != "article":
         raise ValueError("only journal article records supported")
+    # schema.md documents `source`; formats.md and BibTeX use `journal`.
+    if not rec.get("journal") and rec.get("source"):
+        rec = dict(rec, journal=rec["source"])
     if rec.get("authors_complete") is not True:
         raise ValueError("verify full author list and set authors_complete=true")
     authors = rec.get("authors")

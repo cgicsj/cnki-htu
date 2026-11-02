@@ -1,6 +1,6 @@
 # cnki-htu
 
-`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 使用中国知网，优先通过 `chrome-mcp` 操作本地 Chrome，帮助完成文献检索、筛选、下载与整理。
+`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 使用中国知网，优先通过 Codex Chrome 插件（`@Chrome`）操作本地 Chrome，插件不可用时回退 Chrome DevTools MCP，帮助完成文献检索、筛选、下载与整理。
 
 ## 功能
 
@@ -15,7 +15,7 @@
 
 ## 使用前准备
 
-- Windows 本地环境、Google Chrome、可连接本地 Chrome 会话的 `chrome-mcp`，以及 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
+- Windows 本地环境、Google Chrome、可连接本地 Chrome 会话的 Codex Chrome 插件（`@Chrome`）或 Chrome DevTools MCP，以及 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
 - 需要访问校园资源时，先登录河南师范大学 EasyConnect/VPN，并在所选浏览器中确认知网机构认证有效。校园访问入口和故障处理见[访问与认证说明](references/access.md)。
 - 下载 PDF、Zotero 推送等能力受机构订阅、账号权限、浏览器设置及 Zotero 本地服务状态影响。
 - 首次登录、验证码或重新认证由用户在本机浏览器中完成；请勿在聊天中发送密码、验证码或浏览器 Cookie。
@@ -51,7 +51,7 @@ git clone https://github.com/cgicsj/cnki-htu.git "$env:USERPROFILE\.codex\skills
 
 ## 浏览器选择
 
-网页任务先检查当前 agent 提供的 `chrome-mcp` 工具，读取工具说明并优先连接本地 Chrome。连接不可用时明确报告实际状态；仅在其他可用工具能连接并核验本地 Chrome 会话时回退。每个会话需要单独核验校园认证，不能沿用其他会话的登录结论。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
+网页任务先检查当前 agent 提供的浏览器能力：优先用 Codex Chrome 插件（`@Chrome`）连接本地 Chrome；插件不可用或无法接入时，再使用 Chrome DevTools MCP 等可连接同一会话的工具。连接不可用时明确报告实际状态；每个会话需要单独核验校园认证，不能沿用其他会话的登录结论。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
 
 ## 离线快速示例与测试
 
@@ -66,8 +66,8 @@ python scripts/convert.py examples/records.json --format json --output local-dat
 python -m unittest discover -s tests -v
 ```
 
-示例均为合成数据。重复执行时请换用新的台账/输出路径；既有任务直接续跑。测试只用临时目录和模拟 Zotero 客户端，不访问真实知网或文献库。CI 配置覆盖 Windows/Linux、Python 3.9/3.14；是否通过以实际 CI 结果为准。
+示例均为合成数据。重复执行时请换用新的台账/输出路径；既有任务直接续跑。测试只用临时目录和模拟 Zotero 客户端，不访问真实知网或文献库。CI 配置覆盖 Windows/Linux、Python 3.9/3.12/3.14；以实际 CI 结果为准。
 
 旧 SQLite 台账保留 schema_version=1 和原文献 ID，首次导入时自动添加身份别名表；升级前备份已关闭的台账。旧 Zotero v1 收据继续可读。补 DOI 等操作导致已保存题录变化时会阻止重推，需核对已有条目；这不会自动更新 Zotero 条目，也不能保证全库去重。
 
-环境检查可运行 `powershell -File scripts/check_environment.ps1`，仅输出技能/CLI、EasyConnect 安装与进程信号。认证仍须观察页面。导出遇到残留 `.publish.lock` 时先确认没有活跃导出进程再移除锁；保留已生成成果。所有私人研究输入和导出建议放在 `local-data/` 或仓库外。
+环境检查可运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check_environment.ps1`，仅输出技能/CLI、EasyConnect 安装与进程信号。认证仍须观察页面。导出遇到残留 `.publish.lock` 时先确认没有活跃导出进程再移除锁；保留已生成成果。所有私人研究输入和导出建议放在 `local-data/` 或仓库外。

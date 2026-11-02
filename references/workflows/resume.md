@@ -20,6 +20,11 @@ Store research data in the user's chosen local task folder, outside a source rep
   The atomic transaction rejects a second claim. Running entries remain running
   after a crash: inspect the browser/transfer/files before deciding whether to
   record a verified completion or explicitly reset to pending with a reason.
+- A completed `download` or `citation` receipt can be explicitly reset with
+  `reset --stage <stage> --reason <why>` when the artifact is valid but wrong
+  (for example, a different paper was downloaded). This clears the old artifact
+  receipt and records both stages in the event history. Evidence stages are
+  updated with `screen`/`extract`, not `reset`.
 - Failed/blocked entries do not auto-retry. After resolving the cause, reset that
   specific stage using `mark --status pending --reason ...`, then resume. Preserve
   bounded retry limits in download. Do not restart an active transfer.

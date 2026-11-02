@@ -20,7 +20,7 @@ JSON is a record or array:
 }
 ```
 
-Required: title, authors array, authors_complete=true, journal.
+Required: title, authors array, authors_complete=true, journal (the documented `source` alias is normalized to `journal`).
 Optional string fields: year, volume, issue, pages, doi, url, cnki_id
 (include database + filename when both are observed).
 Unknown optional fields must be omitted. Authors are preserved as literal BibTeX
@@ -28,7 +28,8 @@ names, avoiding guessed Chinese family/given-name splits; do not split a compoun
 Chinese name. Journal names, titles and individual authors must be source-verified.
 
 RIS: TY=JOUR, TI/T1, AU/A1 (one author per tag), JO/JF/T2, PY/Y1,
-VL, IS, SP, EP, DO, UR, and mandatory ER record terminator.
+VL, IS, SP, EP, DO, UR, and mandatory ER record terminator. Tag lines tolerate
+one to three spaces or a tab before the hyphen.
 EndNote tagged: %0 Journal Article, %T, repeated %A, %J, %D, %V, %N,
 %P, %R (DOI only), %U. Records begin with %0. Indented continuation lines
 are supported. CNKI native EndNote exports also carry %+, %@, %K, %X, %L and %W;

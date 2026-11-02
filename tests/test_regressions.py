@@ -1,6 +1,7 @@
 """Offline behavioral tests; never contact CNKI or a real Zotero library."""
 import json
 from pathlib import Path
+import hashlib
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +27,10 @@ def record(i=1, **kw):
     return value
 
 
+def synthetic_pdf(content=b'synthetic'):
+    return b'%PDF-1.7\n' + content + b'\n%%EOF'
+
+
 class FakeClient:
     def __init__(self, code=201):
         self.code, self.writes = code, []
@@ -35,6 +40,38 @@ class FakeClient:
             return 200, dict(libraryID=1, libraryEditable=True, filesEditable=True)
         self.writes.append((endpoint, data))
         return self.code, {}
+
+
+class FakeMCP:
+    def __init__(self, library_editable=True, files_editable=True, attachment_key='ATTACH12'):
+        self.libraries = [{'libraryID': 1, 'name': 'Synthetic Library', 'libraryType': 'user',
+                           'libraryEditable': library_editable, 'filesEditable': files_editable}]
+        self.targets = [{'target': 'M1:ABCD1234', 'libraryID': 1, 'collectionKey': 'ABCD1234',
+                         'name': 'Synthetic Collection', 'type': 'collection', 'libraryType': 'user',
+                         'libraryEditable': library_editable, 'filesEditable': files_editable}]
+        self.attachment_key = attachment_key
+
+    def inventory(self):
+        return self.libraries, self.targets
+
+    def call(self, name, arguments=None):
+        if name == 'add_items_to_collection':
+            return {'success': True}
+        if name == 'write_item':
+            action = (arguments or {}).get('action')
+            if action == 'create':
+                return {'success': True, 'data': {'itemKey': 'ITEM1234'}}
+            if action == 'import':
+                return {'success': True, 'data': {'attachmentKey': self.attachment_key}}
+        raise AssertionError(name)
+
+
+class FakeConnector:
+    def request(self, endpoint, data=None, **kw):
+        if endpoint == 'getSelectedCollection':
+            return 200, {'id': 1, 'libraryID': 1, 'name': 'Synthetic Collection',
+                         'libraryEditable': True, 'filesEditable': True}
+        raise AssertionError(endpoint)
 
 
 class RegressionTests(unittest.TestCase):
@@ -68,6 +105,21 @@ class RegressionTests(unittest.TestCase):
         self.add()
         with self.assertRaises(ValueError), self.db:
             w.import_records(self.db, [record(authors=['B'])])
+
+    def test_duplicate_volume_conflict_rejected(self):
+        pid = self.add(record(volume='1'))
+        with self.assertRaises(ValueError), self.db:
+            w.import_records(self.db, [record(volume='2')])
+        self.assertEqual(json.loads(w.paper(self.db, pid)['metadata'])['volume'], '1')
+
+    def test_import_validates_optional_field_types(self):
+        cases = [dict(year='abc'), dict(authors='A'), dict(authors_complete='true'),
+                 dict(authors=[], authors_complete=True)]
+        for value in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError), self.db:
+                    w.import_records(self.db, [record(**value)])
+        self.assertEqual(w.status(self.db)['papers'], 0)
 
     def test_stable_id_after_doi_upgrade_and_reopen(self):
         pid = self.add()
@@ -128,6 +180,14 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('10.1234/one', output)
         self.assertTrue(warnings)
 
+    def test_convert_accepts_documented_source_alias(self):
+        value = record()
+        value.pop('journal')
+        value['source'] = 'Synthetic Source'
+        output, count, _ = convert.render([value])
+        self.assertEqual(count, 1)
+        self.assertIn('journal = {Synthetic Source}', output)
+
     def test_bibtex_database_record_id_matches_changed_url(self):
         self.assertEqual(convert.render([record(), record(url='https://example.org/new', doi='10.1234/one')])[1], 1)
 
@@ -180,12 +240,155 @@ class RegressionTests(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(len(client.writes), 1)
 
+    def test_mcp_inventory_uses_known_permissions(self):
+        mcp = object.__new__(zotero.ZoteroMCP)
+        def call(name, arguments=None):
+            if name == 'get_libraries':
+                return [{'libraryID': 1, 'name': 'User', 'libraryType': 'user'},
+                        {'libraryID': 2, 'name': 'Group', 'libraryType': 'group'},
+                        {'libraryID': 3, 'name': 'Feed', 'libraryType': 'feed'}]
+            if name == 'get_collections':
+                return []
+            raise AssertionError(name)
+        mcp.call = call
+        libraries, targets = mcp.inventory()
+        by_id = {row['libraryID']: row for row in libraries}
+        self.assertIs(by_id[1]['libraryEditable'], True)
+        self.assertIs(by_id[1]['filesEditable'], True)
+        self.assertIsNone(by_id[2]['libraryEditable'])
+        self.assertIsNone(by_id[2]['filesEditable'])
+        self.assertIs(by_id[3]['libraryEditable'], False)
+        self.assertIs(by_id[3]['filesEditable'], False)
+        library_targets = {row['libraryID']: row for row in targets if row['type'] == 'library'}
+        self.assertIsNone(library_targets[2]['filesEditable'])
+
+    def test_mcp_inventory_caches_calls(self):
+        mcp = object.__new__(zotero.ZoteroMCP)
+        calls = []
+        def call(name, arguments=None):
+            calls.append(name)
+            if name == 'get_libraries':
+                return [{'libraryID': 1, 'name': 'User', 'libraryType': 'user'}]
+            if name == 'get_collections':
+                return []
+            raise AssertionError(name)
+        mcp.call = call
+        first = mcp.inventory()
+        second = mcp.inventory()
+        self.assertIs(first, second)
+        self.assertEqual(calls.count('get_libraries'), 1)
+
+    def test_mcp_sse_messages_join_multiline_data(self):
+        raw = 'event: message\ndata: {"jsonrpc":"2.0",\ndata: "id":1}\n\n'
+        self.assertEqual(zotero._sse_messages(raw), ['{"jsonrpc":"2.0",\n"id":1}'])
+        self.assertEqual(zotero._sse_messages('data: {"id":1}\n\n'), ['{"id":1}'])
+        self.assertIsNone(zotero._returned_key({'message': 'ITEM1234'}))
+
+    def test_mcp_read_only_target_rejected_before_write(self):
+        adapter = zotero.MCPAdapter(FakeMCP(False, False), 'M1:ABCD1234')
+        with self.assertRaises(RuntimeError):
+            zotero.selected(adapter, 'M1:ABCD1234')
+
+    def test_mcp_pdf_requires_confirmed_file_permission(self):
+        path = self.root / 'paper.pdf'
+        path.write_bytes(synthetic_pdf())
+        for files_editable in (False, None):
+            with self.subTest(files_editable=files_editable):
+                adapter = zotero.MCPAdapter(FakeMCP(True, files_editable), 'M1:ABCD1234')
+                with self.assertRaises(RuntimeError):
+                    zotero.push([record(pdf_path=str(path), pdf_identity_verified=True)],
+                                self.root / 'zotero-receipt.json', 'M1:ABCD1234', adapter)
+
+    def test_mcp_attachment_requires_returned_key(self):
+        path = self.root / 'attachment.pdf'
+        path.write_bytes(synthetic_pdf())
+        adapter = zotero.MCPAdapter(FakeMCP(), 'M1:ABCD1234')
+        code, reply = adapter.request('saveAttachment?sessionID=test', metadata={
+            'parentItemID': 'ABCD1234', 'path': str(path),
+            'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'title': 'Full Text PDF'})
+        self.assertEqual(code, 201)
+        self.assertEqual(reply['attachmentKey'], 'ATTACH12')
+        self.assertEqual(adapter.last_attachment_key, 'ATTACH12')
+
+    def test_mcp_attachment_missing_key_is_uncertain(self):
+        path = self.root / 'attachment.pdf'
+        path.write_bytes(synthetic_pdf())
+        adapter = zotero.MCPAdapter(FakeMCP(attachment_key=None), 'M1:ABCD1234')
+        code, reply = adapter.request('saveAttachment?sessionID=test', metadata={
+            'parentItemID': 'ABCD1234', 'path': str(path),
+            'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'title': 'Full Text PDF'})
+        self.assertEqual(code, 0)
+        self.assertEqual(reply['error'], 'attachment_created_but_mcp_key_unconfirmed')
+        self.assertIsNone(adapter.last_attachment_key)
+
+    def test_mcp_c_target_maps_to_collection_key(self):
+        adapter = zotero.MCPAdapter(FakeMCP(), 'C1')
+        adapter.connector = FakeConnector()
+        target, selection = adapter.resolve_selected()
+        self.assertEqual(target, 'C1')
+        self.assertEqual(selection['canonicalTarget'], 'M1:ABCD1234')
+
+    def test_mcp_c_target_receipt_uses_canonical_key(self):
+        adapter = zotero.MCPAdapter(FakeMCP(), 'C1')
+        adapter.connector = FakeConnector()
+        state = self.root / 'canonical-state.json'
+        result = zotero.push([record()], state, 'C1', adapter)
+        self.assertTrue(result['complete'])
+        records = json.loads(state.read_text(encoding='utf-8'))['records']
+        self.assertTrue(all(key.startswith('M1:ABCD1234:') for key in records))
+
+    def test_mcp_pdf_saves_attachment_key(self):
+        path = self.root / 'paper.pdf'
+        path.write_bytes(synthetic_pdf())
+        adapter = zotero.MCPAdapter(FakeMCP(), 'M1:ABCD1234')
+        state = self.root / 'mcp-pdf-state.json'
+        result = zotero.push([record(pdf_path=str(path), pdf_identity_verified=True)],
+                             state, 'M1:ABCD1234', adapter)
+        self.assertTrue(result['complete'])
+        row = next(iter(json.loads(state.read_text(encoding='utf-8'))['records'].values()))
+        self.assertEqual(row['mcp_item_key'], 'ITEM1234')
+        self.assertEqual(row['mcp_attachment_key'], 'ATTACH12')
+
+    def test_resolve_records_mcp_item_key(self):
+        client = FakeClient(0)
+        state = self.root / 'resolve-state.json'
+        zotero.push([record()], state, 'L1', client)
+        key = next(iter(json.loads(state.read_text(encoding='utf-8'))['records']))
+        zotero.resolve(state, key, 'metadata', 'saved', 'checked in Zotero', 'ABCD1234')
+        row = json.loads(state.read_text(encoding='utf-8'))['records'][key]
+        self.assertEqual(row['mcp_item_key'], 'ABCD1234')
+
+    def test_init_failure_removes_created_file(self):
+        task = self.root / 'broken.sqlite'
+        with patch.object(w.sqlite3, 'connect', side_effect=OSError('synthetic failure')):
+            with self.assertRaises(OSError):
+                w.init(task, dict(topic='x', query='x', criteria='x'))
+        self.assertFalse(task.exists())
+
     def test_ris_chinese_and_special_characters(self):
         records = convert.parse_tagged('TY  - JOUR\nTI  - 中文 & 研究\nAU  - 张三\nJO  - 示例期刊\nPY  - 2026\nER  -\n', 'ris')
         output, count, _ = convert.render(records)
         self.assertEqual(count, 1)
         self.assertIn('中文 \\& 研究', output)
         self.assertIn('{张三}', output)
+
+    def test_ris_accepts_single_space_tags(self):
+        records = convert.parse_tagged('TY - JOUR\nTI - X\nAU - A\nJO - J\nPY - 2025\nER -\n', 'ris')
+        self.assertEqual(convert.render(records)[1], 1)
+
+    def test_cli_errors_are_plain_text(self):
+        repo = Path(__file__).resolve().parents[1]
+        missing = str(self.root / 'missing-input.json')
+        commands = [
+            ['scripts/workflow.py', '--task', str(self.root / 'missing.sqlite'), 'status'],
+            ['scripts/convert.py', missing, '--format', 'json', '--output', str(self.root / 'out.bib')],
+            ['scripts/push_to_zotero.py', missing],
+        ]
+        for args in commands:
+            result = subprocess.run([sys.executable, '-B'] + args, cwd=repo, capture_output=True, encoding='utf-8')
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertTrue(result.stderr.strip(), result.stderr)
+            self.assertFalse(result.stderr.lstrip().startswith('{'), result.stderr)
 
     def test_command_line_examples(self):
         repo = Path(__file__).resolve().parents[1]
@@ -229,13 +432,13 @@ class RegressionTests(unittest.TestCase):
     def test_artifact_revalidation_and_claim(self):
         pid = self.add()
         path = self.root / 'synthetic.pdf'
-        path.write_bytes(b'%PDF-1.7\nsynthetic\n%%EOF')
+        path.write_bytes(synthetic_pdf())
         with self.db:
             w.mark(self.db, pid, 'download', 'running')
             with self.assertRaises(ValueError):
                 w.mark(self.db, pid, 'download', 'running')
             w.mark(self.db, pid, 'download', 'done', path=path, identity_verified=True)
-        path.write_bytes(b'%PDF-1.7\nchanged\n%%EOF')
+        path.write_bytes(synthetic_pdf(b'changed'))
         checked = w.inspect_artifacts(self.db)
         with self.db:
             w.queue(self.db, checked)
@@ -244,15 +447,29 @@ class RegressionTests(unittest.TestCase):
     def test_stale_file_check_cannot_reset_new_receipt(self):
         pid = self.add()
         path = self.root / 'synthetic.pdf'
-        path.write_bytes(b'%PDF-1.7 old')
+        path.write_bytes(synthetic_pdf(b'old'))
         with self.db:
             w.mark(self.db, pid, 'download', 'done', path=path, identity_verified=True)
-        path.write_bytes(b'%PDF-1.7 new')
+        path.write_bytes(synthetic_pdf(b'new'))
         checked = w.inspect_artifacts(self.db)
         with self.db:
             w.mark(self.db, pid, 'download', 'done', path=path, identity_verified=True)
             w.queue(self.db, checked)
         self.assertEqual(w.stage(self.db, pid, 'download')['status'], 'done')
+
+    def test_completed_download_can_be_reset(self):
+        pid = self.add()
+        path = self.root / 'synthetic.pdf'
+        path.write_bytes(synthetic_pdf())
+        with self.db:
+            w.mark(self.db, pid, 'download', 'done', path=path, identity_verified=True)
+        with self.db:
+            result = w.reset(self.db, pid, 'download', 'wrong paper; file checked and replaced')
+        self.assertEqual(result['status'], 'pending')
+        current = w.stage(self.db, pid, 'download')
+        self.assertEqual(current['status'], 'pending')
+        self.assertIsNone(current['artifact'])
+        self.assertEqual(self.db.execute("SELECT count(*) FROM events WHERE action='download:reset'").fetchone()[0], 1)
 
     def test_export_xml_and_no_overwrite(self):
         self.add(record(title='=Synthetic <&>'))
@@ -264,9 +481,20 @@ class RegressionTests(unittest.TestCase):
                 if member.endswith(('.xml', '.rels')):
                     ET.fromstring(archive.read(member))
             self.assertNotIn('<f>', archive.read('xl/worksheets/sheet1.xml').decode())
+            self.assertIn('<dimension ref="A1:', archive.read('xl/worksheets/sheet1.xml').decode())
         self.assertIn("'=Synthetic", (dest / '文献筛选表.csv').read_text(encoding='utf-8-sig'))
         with self.assertRaises(FileExistsError):
             w.export(self.db, dest)
+
+    def test_export_null_fields_are_blank(self):
+        self.add(record(year=None, source=None, abstract=None))
+        dest = self.root / 'null-report'
+        with self.db:
+            result = w.export(self.db, dest)
+        with zipfile.ZipFile(result['workbook']) as archive:
+            sheet = archive.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertNotIn('>None<', sheet)
+        self.assertIn('Synthetic Journal', sheet)
 
     def test_export_failure_publishes_no_partial_directory(self):
         self.add()

@@ -118,6 +118,7 @@ python3 /path/to/workflow.py --task /local/research/task.sqlite mark --id cnki:S
 python3 /path/to/workflow.py --task /local/research/task.sqlite mark --id cnki:SYNTHETIC:demo-1 --stage download --status blocked --reason '需要恢复机构登录'
 python3 /path/to/workflow.py --task /local/research/task.sqlite mark --id cnki:SYNTHETIC:demo-1 --stage download --status pending --reason '机构登录已恢复；已确认没有活跃下载'
 python3 /path/to/workflow.py --task /local/research/task.sqlite mark --id cnki:SYNTHETIC:demo-1 --stage download --status done --artifact /local/research/paper.pdf --identity-verified
+python3 /path/to/workflow.py --task /local/research/task.sqlite reset --id cnki:SYNTHETIC:demo-1 --stage download --reason '下载到错误论文；已核对并删除旧文件'
 ```
 Only pending eligible stages can be claimed. After an interruption, a running
 stage is deliberately not reset automatically. Recover a completed transfer from

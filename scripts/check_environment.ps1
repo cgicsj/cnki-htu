@@ -21,8 +21,8 @@ if ($LaunchEasyConnect -and $processes.Count -eq 0 -and $installed.Count -gt 0) 
     $launched = $true
 }
 [ordered]@{
-    browser_preference = 'Prefer chrome-mcp to operate the local Chrome session; read the current tool documentation before use.'
-    chrome_mcp_availability = 'unknown; inspect the current agent tool catalog and verify the actual Chrome connection'
+    browser_preference = 'Prefer the Codex Chrome plugin (@Chrome) to operate the local Chrome session; fall back to Chrome DevTools MCP only when the plugin is unavailable; read the current tool documentation before use.'
+    browser_tool_availability = 'unknown; inspect the current agent tool catalog and verify the actual Chrome connection'
     insecure_content = [ordered]@{
         status = 'unknown'
         required_stage = 'environment_check_before_search_and_download'
@@ -34,7 +34,7 @@ if ($LaunchEasyConnect -and $processes.Count -eq 0 -and $installed.Count -gt 0) 
     executable_candidates = $installed
     launched_for_manual_login = $launched
     authentication = 'unknown'
-    next_check = 'Connect to local Chrome with chrome-mcp; complete the insecure-content allow-list check for [*.]htu.edu.cn during environment setup, then verify EasyConnect, campus access and institution authentication before search or download.'
+    next_check = 'Connect to local Chrome with the Codex Chrome plugin (@Chrome), or Chrome DevTools MCP when the plugin is unavailable; complete the insecure-content allow-list check for [*.]htu.edu.cn during environment setup, then verify EasyConnect, campus access and institution authentication before search or download.'
     vpn_url = 'https://vpn.htu.edu.cn'
     cnki_url = 'http://www-cnki-net-s.vpn.htu.edu.cn:8118'
     help_url = 'https://www.htu.edu.cn/info/2011/0116/c18431a250850/page.htm'

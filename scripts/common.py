@@ -75,7 +75,8 @@ def aliases(rec):
 def merge_metadata(old, new):
     if doi(old.get('doi') or '') and doi(new.get('doi') or '') and doi(old['doi']) != doi(new['doi']):
         raise ValueError('Conflicting DOI for the same paper')
-    for key in ('title', 'year', 'record_id', 'database', 'cnki_id', 'journal'):
+    for key in ('title', 'year', 'record_id', 'database', 'cnki_id', 'journal',
+                'volume', 'issue', 'pages'):
         if old.get(key) and new.get(key) and old[key] != new[key]:
             raise ValueError('Conflicting duplicate metadata: ' + key)
     merged = dict(old)
@@ -93,6 +94,31 @@ def merge_metadata(old, new):
         if not merged.get(key) and value:
             merged[key] = value
     return merged
+
+
+def validate_record(rec):
+    """Validate optional record fields before a ledger import."""
+    if not isinstance(rec, dict):
+        raise ValueError('Each record must be an object')
+    for key in ('title', 'url', 'retrieved_at'):
+        if not isinstance(rec.get(key), str) or not rec[key].strip():
+            raise ValueError(key + ' must be non-empty text')
+    authors = rec.get('authors')
+    if authors is not None:
+        if not isinstance(authors, list) or any(not isinstance(a, str) or not a.strip() for a in authors):
+            raise ValueError('authors must be a string array')
+    complete = rec.get('authors_complete')
+    if complete is not None and not isinstance(complete, bool):
+        raise ValueError('authors_complete must be boolean')
+    if complete is True and not authors:
+        raise ValueError('authors_complete=true requires a non-empty authors array')
+    year = rec.get('year')
+    if year is not None and year != '':
+        if not isinstance(year, str) or not re.fullmatch(r'\d{4}', year):
+            raise ValueError('year must be a four-digit string or null')
+    for key in ('journal', 'source', 'volume', 'issue', 'pages', 'abstract', 'doi'):
+        if rec.get(key) is not None and not isinstance(rec[key], str):
+            raise ValueError(key + ' must be text')
 
 
 def legacy_identities(rec):
