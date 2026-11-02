@@ -66,7 +66,7 @@ python scripts/convert.py examples/records.json --format json --output local-dat
 python -m unittest discover -s tests -v
 ```
 
-示例均为合成数据。重复执行时请换用新的台账/输出路径；既有任务直接续跑。测试只用临时目录和模拟 Zotero 客户端，不访问真实知网或文献库。CI 配置覆盖 Windows/Linux、Python 3.9/3.12/3.14；以实际 CI 结果为准。
+示例均为合成数据。重复执行时请换用新的台账/输出路径；既有任务直接续跑。测试只用临时目录和模拟 Zotero 客户端，不访问真实知网或文献库。CI 配置覆盖 Windows/Linux、Python 3.9/3.12/3.14（Ubuntu 3.9 固定在 22.04）；以实际 CI 结果为准。
 
 旧 SQLite 台账保留 schema_version=1 和原文献 ID，首次导入时自动添加身份别名表；升级前备份已关闭的台账。旧 Zotero v1 收据继续可读。补 DOI 等操作导致已保存题录变化时会阻止重推，需核对已有条目；这不会自动更新 Zotero 条目，也不能保证全库去重。
 
