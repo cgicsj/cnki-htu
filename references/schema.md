@@ -35,6 +35,10 @@ python3 /path/to/workflow.py --task /local/research/task.sqlite import --input r
 
 `records.json` is an array. Required: title, observed public URL, retrieved_at.
 Preferred: DOI, or database + record_id. Import returns stable IDs used below.
+`source` is an alias of `journal`; imports retain the observed source and store
+the canonical journal. Different non-empty values are rejected, including across
+duplicate imports. Legacy source-only records use the same conflict checks;
+exports refuse legacy records containing contradictory source/journal values.
 Without a strong ID, the observed URL supplies a local locator key; possible
 same-title/year records are preserved and flagged. Original metadata is retained.
 Conflicting title/year/authors/record identifiers on the same identity abort the

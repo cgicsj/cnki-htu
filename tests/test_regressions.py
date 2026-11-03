@@ -188,6 +188,51 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertIn('journal = {Synthetic Source}', output)
 
+    def test_journal_alias_conflicts_rejected_at_all_entry_points(self):
+        value = record(source='Different Journal')
+        for validate in (self.add, convert.normalize, zotero.prepare):
+            with self.subTest(validate=validate), self.assertRaises(ValueError):
+                validate(value)
+        self.assertEqual(w.status(self.db)['papers'], 0)
+
+    def test_journal_alias_conflicts_across_imports(self):
+        source = record(source='Synthetic Journal')
+        source.pop('journal')
+        for first, second in ((source, record(journal='Different Journal')),
+                              (record(), dict(source, source='Different Journal'))):
+            with self.subTest(first=first):
+                pid = self.add(first)
+                with self.assertRaises(ValueError), self.db:
+                    w.import_records(self.db, [record(2), second])
+                self.assertEqual(w.status(self.db)['papers'], 1)
+                self.assertEqual(json.loads(w.paper(self.db, pid)['metadata'])['journal'],
+                                 'Synthetic Journal')
+
+    def test_legacy_source_only_record_matches_canonical_journal(self):
+        value = record(source='Synthetic Journal')
+        value.pop('journal')
+        pid = self.add(value)
+        # Simulate an old ledger that predates canonical journal storage.
+        with self.db:
+            self.db.execute('UPDATE papers SET metadata=? WHERE id=?', (json.dumps(value), pid))
+        self.db.close()
+        self.db = w.connect(self.task)
+        self.assertEqual(self.add(record()), pid)
+        actual = json.loads(w.paper(self.db, pid)['metadata'])
+        self.assertEqual(actual['journal'], 'Synthetic Journal')
+        self.assertEqual(w.tables(self.db)['文献筛选表'][1][5], convert.normalize(actual)['journal'])
+        with self.assertRaises(ValueError), self.db:
+            w.import_records(self.db, [record(journal='Different Journal')])
+
+    def test_export_rejects_conflicting_legacy_journal_aliases(self):
+        pid = self.add()
+        with self.db:
+            self.db.execute('UPDATE papers SET metadata=? WHERE id=?',
+                            (json.dumps(record(source='Different Journal')), pid))
+        with self.assertRaises(ValueError):
+            w.export(self.db, self.root / 'conflicting-report')
+        self.assertFalse((self.root / 'conflicting-report').exists())
+
     def test_bibtex_database_record_id_matches_changed_url(self):
         self.assertEqual(convert.render([record(), record(url='https://example.org/new', doi='10.1234/one')])[1], 1)
 
@@ -217,6 +262,91 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(result['complete'])
         self.assertEqual(len(client.writes), 1)
         self.assertEqual(client.writes[0][1]['items'][0]['DOI'], '10.1234/one')
+
+    def legacy_collection_receipt(self, metadata='saved'):
+        state = self.root / 'legacy-collection.json'
+        zotero.push([record()], state, 'L1', FakeClient())
+        data = json.loads(state.read_text(encoding='utf-8'))
+        old_key, row = next(iter(data['records'].items()))
+        key = 'C1:' + old_key.split(':', 1)[1]
+        row.pop('aliases')
+        row.update(target='C1', metadata=metadata)
+        data['records'] = {key: row}
+        state.write_text(json.dumps(data), encoding='utf-8')
+        return state, key
+
+    def test_legacy_collection_migration_persists_without_resending(self):
+        for status in ('saved', 'sending', 'uncertain'):
+            with self.subTest(status=status):
+                state, key = self.legacy_collection_receipt(status)
+                mcp = FakeMCP()
+                with patch.object(zotero, 'Client', FakeConnector), patch.object(mcp, 'call', wraps=mcp.call) as call:
+                    zotero.push([record()], state, 'C1', zotero.MCPAdapter(mcp, 'C1'))
+                    # Reopen the receipt and use a new adapter, as after a restart.
+                    migrated = json.loads(state.read_text(encoding='utf-8'))['records'][key]
+                    self.assertEqual(migrated['target'], 'M1:ABCD1234')
+                    self.assertIn('cnki:TEST:1', migrated['aliases'])
+                    result = zotero.push([record()], state, 'M1:ABCD1234',
+                                         zotero.MCPAdapter(mcp, 'M1:ABCD1234'))
+                    call.assert_not_called()
+                self.assertEqual(result['complete'], status == 'saved')
+                self.assertEqual(len(json.loads(state.read_text(encoding='utf-8'))['records']), 1)
+
+    def test_collection_migration_blocks_colliding_receipts(self):
+        state, key = self.legacy_collection_receipt()
+        data = json.loads(state.read_text(encoding='utf-8'))
+        canonical = 'M1:ABCD1234:' + key.split(':', 1)[1]
+        data['records'][canonical] = dict(data['records'][key], target='M1:ABCD1234')
+        state.write_text(json.dumps(data), encoding='utf-8')
+        mcp = FakeMCP()
+        with patch.object(zotero, 'Client', FakeConnector), patch.object(mcp, 'call', wraps=mcp.call) as call:
+            result = zotero.push([record()], state, 'C1', zotero.MCPAdapter(mcp, 'C1'))
+            call.assert_not_called()
+        self.assertEqual(result['results'][0]['status'], 'blocked')
+        self.assertEqual(json.loads(state.read_text(encoding='utf-8')), data)
+
+    def test_receipt_alias_enrichment_keeps_observed_aliases(self):
+        state, key = self.legacy_collection_receipt()
+        data = json.loads(state.read_text(encoding='utf-8'))
+        data['records'][key]['aliases'] = ['url:historical']
+        state.write_text(json.dumps(data), encoding='utf-8')
+        with patch.object(zotero, 'Client', FakeConnector):
+            zotero.push([record()], state, 'C1', zotero.MCPAdapter(FakeMCP(), 'C1'))
+        aliases = json.loads(state.read_text(encoding='utf-8'))['records'][key]['aliases']
+        self.assertIn('url:historical', aliases)
+        self.assertIn('cnki:TEST:1', aliases)
+
+    def test_saved_legacy_item_key_backfill_imports_only_attachment(self):
+        state, key = self.legacy_collection_receipt()
+        zotero.resolve(state, key, 'metadata', 'saved', 'Manually verified item', 'ITEM1234')
+        row = json.loads(state.read_text(encoding='utf-8'))['records'][key]
+        self.assertEqual(row['reconciliation'][-1]['item_key'], 'ITEM1234')
+        path = self.root / 'paper.pdf'
+        path.write_bytes(synthetic_pdf())
+        mcp = FakeMCP()
+        with patch.object(zotero, 'Client', FakeConnector), patch.object(mcp, 'call', wraps=mcp.call) as call:
+            result = zotero.push([record(pdf_path=str(path), pdf_identity_verified=True)],
+                                 state, 'C1', zotero.MCPAdapter(mcp, 'C1'))
+        self.assertTrue(result['complete'])
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(call.call_args.args[0], 'write_item')
+        self.assertEqual(call.call_args.args[1]['action'], 'import')
+        self.assertEqual(call.call_args.args[1]['parentItemKey'], 'ITEM1234')
+
+    def test_saved_item_key_backfill_guards(self):
+        state, key = self.legacy_collection_receipt()
+        original = state.read_bytes()
+        for outcome, note, item_key in (('saved', 'checked', None),
+                                         ('not-saved', 'checked', None),
+                                         ('saved', '  ', 'ITEM1234')):
+            with self.subTest(outcome=outcome, note=note), self.assertRaises(ValueError):
+                zotero.resolve(state, key, 'metadata', outcome, note, item_key)
+            self.assertEqual(state.read_bytes(), original)
+        zotero.resolve(state, key, 'metadata', 'saved', 'checked', 'ITEM1234')
+        original = state.read_bytes()
+        with self.assertRaises(ValueError):
+            zotero.resolve(state, key, 'metadata', 'saved', 'checked', 'OTHER123')
+        self.assertEqual(state.read_bytes(), original)
 
     def test_zotero_conflict_validated_before_write(self):
         client = FakeClient()

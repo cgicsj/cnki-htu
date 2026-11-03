@@ -32,7 +32,7 @@ python <skill-dir>/scripts/push_to_zotero.py papers.json --state <research-folde
 
 ## 续跑与结果不明
 
-- 同一收据、同一目标内，按 DOI、数据库记录 ID 或多字段身份复用成功项；同名论文不直接合并。字段冲突停止该条。MCP 路线会把 `C1` 与对应的 `M1:<collectionKey>` 规范为同一收据目标；旧 C 目标收据首次复用时更新目标字段。若升级前只有 C 目标收据且首次直接使用 M 目标，可能无法自动映射；先用 C 目标续跑一次即可迁移。
+- 同一收据、同一目标内，按 DOI、数据库记录 ID 或多字段身份复用成功项；同名论文不直接合并。字段冲突停止该条。MCP 路线会把 `C1` 与对应的 `M1:<collectionKey>` 规范为同一收据目标；旧 C 目标收据首次复用时持久保存目标映射并补齐身份别名，之后可使用对应的 M 目标续跑。原收据键保持不变，`--resolve` 继续使用返回的原键；若已有多个匹配收据则停止并要求核对，不覆盖已有收据。若升级前只有 C 目标收据且首次直接使用 M 目标，可能无法自动映射；先用 C 目标续跑一次即可迁移。
 - 这是任务收据去重，不能查询全库；已手工导入、其他任务或设备中的条目需在 Zotero 核对。
 - 发送前记 sending，成功后记 saved。超时、断线、HTTP 409 或中断可能已经产生条目，不能当成功或自动重发。
 - MCP 路线将创建后的 Zotero item key 保存到收据，用于后续附件导入和续跑；附件导入还要求 MCP 返回 `attachmentKey`，缺失时记为 `uncertain`，不冒充已保存。旧 Connector 收据没有 MCP item key 时，若题录已保存但附件未完成，脚本会阻止 MCP 路线继续；核对实际题录后，可显式使用 `--transport connector` 续跑，不会自动创建第二条题录。
@@ -43,6 +43,8 @@ python <skill-dir>/scripts/push_to_zotero.py --state <research-folder>/zotero-re
 ```
 
 stage 可为 metadata/pdf，outcome 可为 saved/not-saved。不得为了通过流程而虚构核验。锁文件残留时先确认进程已退出，再移除明确的 .lock；不要删除收据。核对到 MCP item key 时用 `--item-key` 一并写入收据；这样旧 Connector 题录无需重建即可继续 MCP 附件。
+
+旧 Connector 收据的 metadata 已为 saved、但缺少 MCP item key 时，也可使用上面的 `--stage metadata --outcome saved --item-key ... --note ...` 命令补录。必须先核对实际条目的文库、分类和题录身份；补录只更新本地收据并保存核验说明与 key，不重新创建题录或重置附件状态。已有不同 item key 时拒绝覆盖，应先核对冲突。其他 saved 阶段不允许借此重置为未保存。
 
 附件标为 blocked 后，重复执行只报告阻碍，不再次上传。修复明确的拒绝原因并核对附件确实未保存后，才用 `--resolve ... --stage pdf --outcome not-saved --note "核验与修复说明"` 将其恢复为 pending；这条登记本身不会修复失效的 Connector 会话。sending/uncertain 同样先核对实际结果，不能盲目重发。
 

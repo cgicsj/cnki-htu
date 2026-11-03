@@ -72,7 +72,22 @@ def aliases(rec):
     return result
 
 
+def normalize_journal(rec):
+    """Resolve the source alias without discarding the observed metadata."""
+    result = dict(rec)
+    for key in ('journal', 'source'):
+        if result.get(key) is not None and not isinstance(result[key], str):
+            raise ValueError(key + ' must be text')
+    journal, source = result.get('journal'), result.get('source')
+    if journal and source and journal != source:
+        raise ValueError('Conflicting journal/source metadata')
+    if not journal and source:
+        result['journal'] = source
+    return result
+
+
 def merge_metadata(old, new):
+    old, new = normalize_journal(old), normalize_journal(new)
     if doi(old.get('doi') or '') and doi(new.get('doi') or '') and doi(old['doi']) != doi(new['doi']):
         raise ValueError('Conflicting DOI for the same paper')
     for key in ('title', 'year', 'record_id', 'database', 'cnki_id', 'journal',

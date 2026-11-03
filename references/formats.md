@@ -21,6 +21,8 @@ JSON is a record or array:
 ```
 
 Required: title, authors array, authors_complete=true, journal (the documented `source` alias is normalized to `journal`).
+If both `source` and `journal` are non-empty, their values must agree; conflicting
+values are rejected consistently by ledger import, citation conversion and Zotero preparation.
 Optional string fields: year, volume, issue, pages, doi, url, cnki_id
 (include database + filename when both are observed).
 Unknown optional fields must be omitted. Authors are preserved as literal BibTeX

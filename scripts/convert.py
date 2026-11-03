@@ -7,7 +7,7 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
-from common import aliases, doi, merge_metadata, source_url
+from common import aliases, doi, merge_metadata, normalize_journal, source_url
 
 
 def clean(value):
@@ -90,8 +90,7 @@ def normalize(rec):
     if rec.get("type", "article") != "article":
         raise ValueError("only journal article records supported")
     # schema.md documents `source`; formats.md and BibTeX use `journal`.
-    if not rec.get("journal") and rec.get("source"):
-        rec = dict(rec, journal=rec["source"])
+    rec = normalize_journal(rec)
     if rec.get("authors_complete") is not True:
         raise ValueError("verify full author list and set authors_complete=true")
     authors = rec.get("authors")

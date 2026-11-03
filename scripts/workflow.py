@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
-from common import validate_record, source_url, aliases, merge_metadata, evidence_source
+from common import validate_record, source_url, aliases, merge_metadata, evidence_source, normalize_journal
 from xml.sax.saxutils import escape
 import zipfile
 
@@ -139,6 +139,7 @@ def import_records(db, records):
     def title_key(rec):
         return (re.sub(r'\s+', '', rec['title']).casefold(), str(rec.get('year', '')))
     def register(pid, rec):
+        rec = normalize_journal(rec)
         metadata[pid] = rec
         for key in aliases(rec):
             index.setdefault(key, set()).add(pid)
@@ -154,6 +155,7 @@ def import_records(db, records):
         for key in ('title', 'url', 'retrieved_at'):
             required(rec.get(key), key)
         validate_record(rec)
+        rec = normalize_journal(rec)
         keys = aliases(rec)
         candidates = set().union(*(index.get(key, set()) for key in keys))
         if len(candidates) > 1:
@@ -354,7 +356,7 @@ def tables(db):
     sources = [['文献ID', '题名', '字段', '提取内容', '原文证据', '证据位置', '证据来源']]
     criteria = config(db)['criteria']
     for row in db.execute('SELECT * FROM papers ORDER BY rowid'):
-        m = json.loads(row['metadata'])
+        m = normalize_journal(json.loads(row['metadata']))
         s = json.loads(row['screening']) if row['screening'] else {}
         authors = m.get('authors')
         if isinstance(authors, list):

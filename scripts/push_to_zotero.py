@@ -574,7 +574,7 @@ def push(papers, state_path, expected_target, client=None):
         for paper in unique.values():
             targets = {target, receipt_target}
             key = receipt_target + ':' + paper['identity']
-            possible = set()
+            possible = {key} if key in state['records'] else set()
             for candidate in paper['legacy_keys']:
                 for receipt in targets:
                     candidate_key = receipt + ':' + candidate
@@ -610,6 +610,12 @@ def push(papers, state_path, expected_target, client=None):
                 state['records'][key] = row
             else:
                 row['target'] = receipt_target
+                # Keep returned receipt keys stable for --resolve. Persist the
+                # canonical target and aliases even when no network write follows.
+                row['aliases'] = sorted(set((row.get('aliases') or []) + paper['aliases']))
+            for alias in row['aliases']:
+                receipt_aliases.setdefault(alias, set()).add(key)
+            commit()
             if row['metadata'] in ('sending', 'uncertain'):
                 results.append({'key': key, 'status': 'uncertain', 'reason': 'Check Zotero before resolving an uncertain metadata write'})
                 continue
@@ -688,6 +694,10 @@ def pdf_path_uri(path):
 
 
 def resolve(state_path, key, stage, outcome, note, item_key=None):
+    if stage not in ('metadata', 'pdf') or outcome not in ('saved', 'not-saved'):
+        raise ValueError('Invalid reconciliation stage or outcome')
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError('Reconciliation requires a non-empty verification note')
     if item_key is not None:
         if not isinstance(item_key, str) or not re.fullmatch(r'[A-Z0-9]{8}', item_key):
             raise ValueError('--item-key must be an 8-character MCP item key')
@@ -695,9 +705,15 @@ def resolve(state_path, key, stage, outcome, note, item_key=None):
             raise ValueError('--item-key is only valid with --stage metadata --outcome saved')
     with locked_state(state_path) as (state, commit):
         row = state['records'][key]
-        if row[stage] not in ('sending', 'uncertain', 'blocked'):
+        backfill = stage == 'metadata' and outcome == 'saved' and item_key and row[stage] == 'saved'
+        if row[stage] not in ('sending', 'uncertain', 'blocked') and not backfill:
             raise ValueError('Only an uncertain/blocked write may be manually reconciled')
-        row.setdefault('reconciliation', []).append({'stage': stage, 'outcome': outcome, 'note': note})
+        if item_key and row.get('mcp_item_key') and row['mcp_item_key'] != item_key:
+            raise ValueError('Conflicting MCP item key; verify the existing receipt')
+        detail = {'stage': stage, 'outcome': outcome, 'note': note}
+        if item_key:
+            detail['item_key'] = item_key
+        row.setdefault('reconciliation', []).append(detail)
         row[stage] = 'saved' if outcome == 'saved' else 'pending'
         if stage == 'metadata' and outcome == 'saved' and item_key:
             row['mcp_item_key'] = item_key
