@@ -46,3 +46,7 @@ title matches with distinct IDs are kept for manual review. Conflicts stop conve
 The converter reports counts and warnings to stdout; retain these in the local run
 manifest with input format, source page, retrieval time and native/converted status.
 Do not put session-bearing URLs or personal library exports into a public repository.
+
+When no DOI/CNKI ID is available, distinct retained URL records use their URL
+identity for BibTeX keys. Metadata-only records retain a separate fallback key.
+The converter checks generated key uniqueness before writing the output.

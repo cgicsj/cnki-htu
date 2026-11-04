@@ -28,6 +28,8 @@ python <skill-dir>/scripts/push_to_zotero.py papers.json --state <research-folde
 
 需要强制使用某一路线时，可加 `--transport mcp` 或 `--transport connector`；默认 `auto` 优先 MCP，仅在 MCP 初始化/能力发现失败且尚未写入时回退 Connector。`--list --transport connector` 可单独查看 Connector 当前选择。dry-run 完全离线。收据文件选在研究目录，续跑必须复用。MCP 路线以工具成功响应作为阶段确认；Connector 路线只把 HTTP 201 记为相应阶段成功。执行期间保持 Zotero 目标分类不变。
 
+收据会记录已观察到的 C/M 目标别名和题录/附件的写入通道。后续运行回退 Connector 时，已保存或结果不明的 MCP 题录仍复用同一收据，不会作为新条目重发。旧收据若缺少 C/M 映射，脚本会阻止不确定的回退写入；恢复 MCP 后，先使用原 C 目标续跑以核验并保存映射。MCP 创建的题录没有 Connector 附件会话，未完成附件须通过 MCP 继续，不能仅因题录已保存就切换到 Connector 上传。已完成且指纹一致的附件可直接复用。
+
 成功结果以 JSON 分别报告题录、附件和整体结果；输入/连接/状态错误以纯文本写入 stderr。退出码 0=全部请求完成，2=部分未完成，1=输入/连接/状态错误。metadata=saved 但附件失败时，应报告“题录已保存，附件未保存”。
 
 ## 续跑与结果不明
@@ -44,9 +46,13 @@ python <skill-dir>/scripts/push_to_zotero.py --state <research-folder>/zotero-re
 
 stage 可为 metadata/pdf，outcome 可为 saved/not-saved。不得为了通过流程而虚构核验。锁文件残留时先确认进程已退出，再移除明确的 .lock；不要删除收据。核对到 MCP item key 时用 `--item-key` 一并写入收据；这样旧 Connector 题录无需重建即可继续 MCP 附件。
 
+`not-saved` 会把先前 key、文件哈希、状态与通道归档到核验历史，再清除该阶段已失效的当前标识。metadata 未保存时同时重置父条目和附件标识；仅 pdf 未保存时保留父条目，只重置附件 key/哈希，因此可在重新核验后上传同一论文的替换 PDF。不得用此操作绕过已保存附件的变更核验；发送中或结果不明的操作仍须先核对 Zotero。
+
 旧 Connector 收据的 metadata 已为 saved、但缺少 MCP item key 时，也可使用上面的 `--stage metadata --outcome saved --item-key ... --note ...` 命令补录。必须先核对实际条目的文库、分类和题录身份；补录只更新本地收据并保存核验说明与 key，不重新创建题录或重置附件状态。已有不同 item key 时拒绝覆盖，应先核对冲突。其他 saved 阶段不允许借此重置为未保存。
 
 附件标为 blocked 后，重复执行只报告阻碍，不再次上传。修复明确的拒绝原因并核对附件确实未保存后，才用 `--resolve ... --stage pdf --outcome not-saved --note "核验与修复说明"` 将其恢复为 pending；这条登记本身不会修复失效的 Connector 会话。sending/uncertain 同样先核对实际结果，不能盲目重发。
+
+临时下载名（`.crdownload`、`.part`、`.partial`、`.tmp`）不能作为已完成 PDF 推送，即使首尾已有 PDF 标记。收据格式或阶段状态损坏时脚本拒绝写入，不将未知状态报告为成功；保留文件并核对原始收据，不应删除收据绕过去重。
 
 Zotero 重启后旧 Connector 会话可能失效。题录已保存但 PDF 返回 SESSION_NOT_FOUND 时，通过 Zotero 可用界面/连接器把本地 PDF 附加到已有条目，打开附件并核对题名/页数后，再登记 pdf=saved；保留原 HTTP 错误与核验说明，不要再建题录。收据也不能证明用户后来没有删除条目。
 

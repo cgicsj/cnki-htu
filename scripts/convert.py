@@ -142,16 +142,20 @@ def render(records):
         else:
             idx = len(unique)
             identity = ('doi', rec['doi']) if rec.get('doi') else (
-                ('cnki', rec['cnki_id']) if rec.get('cnki_id') else fallback)
+                ('cnki', rec['cnki_id']) if rec.get('cnki_id') else (
+                    ('url', rec['url']) if rec.get('url') else fallback))
             unique.append((identity, rec))
         for key in keys:
             seen[key] = idx
     if not unique:
         raise ValueError("no citation records")
-    entries = []
+    entries, citation_keys = [], set()
     for identity, rec in unique:
         key = "cnki" + rec.get("year", "nd") + "_" + hashlib.sha256(
             json.dumps(identity, ensure_ascii=False).encode()).hexdigest()[:16]
+        if key in citation_keys:
+            raise ValueError('Duplicate generated BibTeX key; resolve citation identities')
+        citation_keys.add(key)
         fields = {"title": "{" + escape(rec["title"]) + "}",
                   "author": " and ".join("{" + escape(a) + "}" for a in rec["authors"]),
                   "journal": escape(rec["journal"])}

@@ -91,6 +91,8 @@ def prepare(raw):
         path = Path(rec['pdf_path']).expanduser()
         if not path.is_absolute() or not path.is_file() or path.is_symlink():
             raise ValueError('pdf_path must be an existing absolute regular file path')
+        if path.suffix.lower() in ('.crdownload', '.part', '.partial', '.tmp'):
+            raise ValueError('PDF still has a temporary filename; confirm download completion first')
         if path.stat().st_size > 200 * 1024 * 1024:
             raise ValueError('PDF exceeds the 200 MiB in-memory upload limit')
         with path.open('rb') as handle:
@@ -145,6 +147,14 @@ class MCPUnavailable(RuntimeError):
 
 class MCPError(RuntimeError):
     pass
+
+
+def rpc_response(value, expected_id):
+    if (not isinstance(value, dict) or value.get('jsonrpc') != '2.0'
+            or type(value.get('id')) is not type(expected_id) or value.get('id') != expected_id
+            or ('result' in value) == ('error' in value)):
+        raise MCPError('Zotero MCP returned an invalid or unmatched JSON-RPC response')
+    return value
 
 
 def _permission(value):
@@ -232,6 +242,7 @@ class ZoteroMCP:
         headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
         if self.session_id and not initialize:
             headers['Mcp-Session-Id'] = self.session_id
+        if not initialize:
             headers['MCP-Protocol-Version'] = self.protocol_version
         request = urllib.request.Request(self.endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers)
         with self.opener.open(request, timeout=20) as response:
@@ -250,16 +261,14 @@ class ZoteroMCP:
             if not parsed:
                 raise MCPError('Zotero MCP returned a non-JSON SSE response')
             for item in parsed:
-                if item.get('id') == payload.get('id') and ('result' in item or 'error' in item):
-                    return item, response_headers
-            for item in reversed(parsed):
-                if 'result' in item or 'error' in item:
-                    return item, response_headers
-            return parsed[-1], response_headers
+                if isinstance(item, dict) and item.get('id') == payload.get('id') and ('result' in item or 'error' in item):
+                    return rpc_response(item, payload['id']), response_headers
+            raise MCPError('Zotero MCP SSE response does not match the request')
         try:
-            return json.loads(raw), response_headers
+            value = json.loads(raw)
         except ValueError as exc:
             raise MCPError('Zotero MCP returned a non-JSON response') from exc
+        return rpc_response(value, payload['id']), response_headers
 
     def call(self, name, arguments=None):
         if name not in self.tools:
@@ -516,8 +525,7 @@ def locked_state(path):
         raise RuntimeError('Push already running or stale lock exists; inspect the process before removing the lock')
     try:
         state = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'version': 1, 'records': {}}
-        if state.get('version') != 1 or not isinstance(state.get('records'), dict):
-            raise ValueError('Unsupported Zotero receipt state')
+        validate_state(state)
         def commit():
             temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
             try:
@@ -534,7 +542,62 @@ def locked_state(path):
         lock.unlink(missing_ok=True)
 
 
+def validate_state(state):
+    """Reject malformed receipts before a write or a completion claim."""
+    if not isinstance(state, dict) or type(state.get('version')) is not int or state['version'] != 1 or not isinstance(state.get('records'), dict):
+        raise ValueError('Unsupported Zotero receipt state')
+    target_pattern = r'(?:[CL]\d+|M\d+:[A-Z0-9]{8})'
+    for key, row in state['records'].items():
+        if not isinstance(row, dict) or not re.fullmatch(target_pattern + r':[a-f0-9]{64}', key):
+            raise ValueError('Invalid Zotero receipt record')
+        if not isinstance(row.get('target'), str) or not re.fullmatch(target_pattern, row['target']):
+            raise ValueError('Invalid Zotero receipt target')
+        for name in ('metadata', 'pdf'):
+            if row.get(name) not in ('pending', 'sending', 'saved', 'uncertain', 'blocked'):
+                raise ValueError('Invalid Zotero receipt status: ' + name)
+        for name in ('session', 'item_id', 'fingerprint'):
+            if not isinstance(row.get(name), str) or not row[name]:
+                raise ValueError('Invalid Zotero receipt field: ' + name)
+        if not re.fullmatch(r'[a-f0-9]{64}', row['fingerprint']):
+            raise ValueError('Invalid Zotero receipt fingerprint')
+        for name in ('pdf_sha256', 'mcp_item_key', 'mcp_attachment_key'):
+            value = row.get(name)
+            pattern = r'[a-f0-9]{64}' if name == 'pdf_sha256' else r'[A-Z0-9]{8}'
+            if value is not None and (not isinstance(value, str) or not re.fullmatch(pattern, value)):
+                raise ValueError('Invalid Zotero receipt field: ' + name)
+        for name in ('aliases', 'target_aliases'):
+            values = row.get(name)
+            if values is not None and (not isinstance(values, list) or any(not isinstance(v, str) or not v for v in values)):
+                raise ValueError('Invalid Zotero receipt aliases: ' + name)
+        if any(not re.fullmatch(target_pattern, value) for value in row.get('target_aliases') or []):
+            raise ValueError('Invalid Zotero receipt target aliases')
+        if 'reconciliation' in row and not isinstance(row['reconciliation'], list):
+            raise ValueError('Invalid Zotero reconciliation history')
+        for name in ('metadata_transport', 'pdf_transport'):
+            if row.get(name) not in (None, 'connector', 'zotero-mcp'):
+                raise ValueError('Invalid Zotero receipt transport: ' + name)
+        if row['pdf'] in ('sending', 'saved', 'uncertain') and not row.get('pdf_sha256'):
+            raise ValueError('Attachment receipt is missing its PDF fingerprint')
+
+
+def receipt_targets(key, row):
+    """Only targets observed together may be used as equivalent destinations."""
+    return set(row.get('target_aliases') or []) | {row['target'], key.rsplit(':', 1)[0]}
+
+
+def receipt_tokens(key, row):
+    return set(row.get('aliases') or []) | {'receipt:' + key.rsplit(':', 1)[-1]}
+
+
+def unmapped_collection(scopes, target, library_id):
+    """A legacy MCP collection cannot be equated to a Connector ID by name."""
+    return (target.startswith('C') and not any(s.startswith('C') for s in scopes)
+            and any(s.startswith('M' + str(library_id) + ':') for s in scopes))
+
+
 def push(papers, state_path, expected_target, client=None):
+    if not isinstance(papers, list) or not papers:
+        raise ValueError('Supply a non-empty array of papers')
     client = client or Client()
     prepared = [prepare(p) for p in papers]  # Validate the full set before the first write.
     unique = {}
@@ -567,23 +630,26 @@ def push(papers, state_path, expected_target, client=None):
         raise RuntimeError('Target does not confirm file-attachment permission; no items were written')
     results = []
     with locked_state(state_path) as (state, commit):
-        receipt_aliases = {}
+        receipt_index = {}
         for receipt_key, receipt_row in state['records'].items():
-            for alias in receipt_row.get('aliases') or []:
-                receipt_aliases.setdefault(alias, set()).add(receipt_key)
+            for token in receipt_tokens(receipt_key, receipt_row):
+                receipt_index.setdefault(token, set()).add(receipt_key)
         for paper in unique.values():
             targets = {target, receipt_target}
             key = receipt_target + ':' + paper['identity']
-            possible = {key} if key in state['records'] else set()
-            for candidate in paper['legacy_keys']:
-                for receipt in targets:
-                    candidate_key = receipt + ':' + candidate
-                    if candidate_key in state['records']:
-                        possible.add(candidate_key)
-            for alias in paper['aliases']:
-                for candidate_key in receipt_aliases.get(alias, ()):
-                    if state['records'][candidate_key].get('target') in targets:
-                        possible.add(candidate_key)
+            possible, unmapped = set(), set()
+            tokens = set(paper['aliases']) | {'receipt:' + value for value in paper['legacy_keys'] + [paper['identity']]}
+            candidates = set().union(*(receipt_index.get(token, set()) for token in tokens))
+            for candidate_key in candidates:
+                scopes = receipt_targets(candidate_key, state['records'][candidate_key])
+                if scopes & targets:
+                    possible.add(candidate_key)
+                elif unmapped_collection(scopes, target, collection['libraryID']):
+                    unmapped.add(candidate_key)
+            if unmapped:
+                results.append({'key': key, 'status': 'blocked',
+                                'reason': 'Existing MCP collection receipt has no verified Connector mapping; resume with MCP before changing transport'})
+                continue
             if len(possible) > 1:
                 results.append({'key': key, 'status': 'blocked', 'reason': 'Multiple receipts match; reconcile manually'})
                 continue
@@ -591,9 +657,9 @@ def push(papers, state_path, expected_target, client=None):
                 key = possible.pop()
             row = state['records'].get(key)
             if row and any(
-                {a for a in row.get('aliases', []) if a.startswith(prefix)} and
+                {a for a in row.get('aliases') or [] if a.startswith(prefix)} and
                 {a for a in paper['aliases'] if a.startswith(prefix)} and
-                not ({a for a in row.get('aliases', []) if a.startswith(prefix)} &
+                not ({a for a in row.get('aliases') or [] if a.startswith(prefix)} &
                      {a for a in paper['aliases'] if a.startswith(prefix)})
                 for prefix in ('doi:', 'cnki:')
             ):
@@ -609,19 +675,26 @@ def push(papers, state_path, expected_target, client=None):
                        'mcp_item_key': None, 'mcp_attachment_key': None}
                 state['records'][key] = row
             else:
-                row['target'] = receipt_target
                 # Keep returned receipt keys stable for --resolve. Persist the
                 # canonical target and aliases even when no network write follows.
                 row['aliases'] = sorted(set((row.get('aliases') or []) + paper['aliases']))
-            for alias in row['aliases']:
-                receipt_aliases.setdefault(alias, set()).add(key)
+            row['target_aliases'] = sorted(receipt_targets(key, row) | targets)
+            if receipt_target.startswith('M'):
+                row['target'] = receipt_target
+            for token in receipt_tokens(key, row):
+                receipt_index.setdefault(token, set()).add(key)
             commit()
             if row['metadata'] in ('sending', 'uncertain'):
                 results.append({'key': key, 'status': 'uncertain', 'reason': 'Check Zotero before resolving an uncertain metadata write'})
                 continue
+            if row['metadata'] == 'blocked':
+                results.append({'key': key, 'status': 'blocked',
+                                'reason': 'Resolve the blocked metadata receipt after checking Zotero'})
+                continue
             if row['metadata'] == 'pending':
                 selected(client, target)
                 row['metadata'] = 'sending'
+                row['metadata_transport'] = getattr(client, 'transport', 'connector')
                 commit()
                 item = dict(paper['item'], id=row['item_id'])
                 code, reply = client.request('saveItems', {'sessionID': row['session'], 'uri': item.get('url', ''), 'items': [item]})
@@ -642,11 +715,7 @@ def push(papers, state_path, expected_target, client=None):
                     raise
             pdf = paper['pdf']
             if pdf:
-                if getattr(client, 'transport', '') == 'zotero-mcp' and not row.get('mcp_item_key'):
-                    results.append({'key': key, 'status': 'blocked', 'metadata': 'saved',
-                                    'reason': 'This receipt predates Zotero MCP item keys; rerun explicitly with --transport connector or reconcile the existing item first'})
-                    continue
-                if row['pdf_sha256'] and row['pdf_sha256'] != pdf['sha256']:
+                if row.get('pdf_sha256') and row['pdf_sha256'] != pdf['sha256']:
                     results.append({'key': key, 'status': 'blocked', 'reason': 'PDF changed; check the existing attachment'})
                     continue
                 if row['pdf'] == 'blocked':
@@ -657,6 +726,17 @@ def push(papers, state_path, expected_target, client=None):
                     results.append({'key': key, 'status': 'uncertain', 'metadata': 'saved', 'reason': 'Check the attachment before retrying'})
                     continue
                 if row['pdf'] != 'saved':
+                    if getattr(client, 'transport', '') == 'zotero-mcp' and not row.get('mcp_item_key'):
+                        results.append({'key': key, 'status': 'blocked', 'metadata': 'saved',
+                                        'reason': 'This receipt predates Zotero MCP item keys; rerun explicitly with --transport connector or reconcile the existing item first'})
+                        continue
+                    parent_transport = row.get('metadata_transport') or (
+                        'connector' if key.startswith('C') else
+                        'zotero-mcp' if row.get('mcp_item_key') or row['target'].startswith('M') else 'connector')
+                    if getattr(client, 'transport', 'connector') != 'zotero-mcp' and parent_transport == 'zotero-mcp':
+                        results.append({'key': key, 'status': 'blocked', 'metadata': 'saved',
+                                        'reason': 'MCP-created parent has no Connector session; resume its attachment with MCP'})
+                        continue
                     _, col = selected(client, target)
                     if col.get('filesEditable') is not True:
                         raise RuntimeError('Target no longer confirms file-attachment permission')
@@ -666,6 +746,7 @@ def push(papers, state_path, expected_target, client=None):
                         if hashlib.sha256(pdf_bytes).hexdigest() != pdf['sha256']:
                             raise ValueError('PDF changed after input validation; re-open and verify the file')
                     row.update(pdf='sending', pdf_sha256=pdf['sha256'])
+                    row['pdf_transport'] = getattr(client, 'transport', 'connector')
                     commit()
                     url = paper['item'].get('url') or pdf_path_uri(pdf['path'])
                     code, reply = client.request('saveAttachment?sessionID=' + row['session'], blob=pdf_bytes,
@@ -713,12 +794,20 @@ def resolve(state_path, key, stage, outcome, note, item_key=None):
         detail = {'stage': stage, 'outcome': outcome, 'note': note}
         if item_key:
             detail['item_key'] = item_key
+        if outcome == 'not-saved':
+            detail['previous'] = {name: row.get(name) for name in (
+                'metadata', 'pdf', 'session', 'item_id', 'mcp_item_key',
+                'mcp_attachment_key', 'pdf_sha256', 'metadata_transport', 'pdf_transport')}
         row.setdefault('reconciliation', []).append(detail)
         row[stage] = 'saved' if outcome == 'saved' else 'pending'
         if stage == 'metadata' and outcome == 'saved' and item_key:
             row['mcp_item_key'] = item_key
         if stage == 'metadata' and outcome == 'not-saved':
-            row.update(session=uuid.uuid4().hex, item_id=uuid.uuid4().hex, pdf='pending', pdf_sha256=None)
+            row.update(session=uuid.uuid4().hex, item_id=uuid.uuid4().hex,
+                       pdf='pending', pdf_sha256=None, mcp_item_key=None,
+                       mcp_attachment_key=None, metadata_transport=None, pdf_transport=None)
+        elif stage == 'pdf' and outcome == 'not-saved':
+            row.update(pdf_sha256=None, mcp_attachment_key=None, pdf_transport=None)
         commit()
 
 

@@ -68,6 +68,8 @@ python -m unittest discover -s tests -v
 
 示例均为合成数据。重复执行时请换用新的台账/输出路径；既有任务直接续跑。测试只用临时目录和模拟 Zotero 客户端，不访问真实知网或文献库。CI 配置覆盖 Windows/Linux、Python 3.9/3.12/3.14（Ubuntu 3.9 固定在 22.04）；以实际 CI 结果为准。
 
+测试还包含临时 localhost HTTP 服务，验证 MCP 的 JSON/SSE 响应、会话头和错误响应处理，以及跨通道续跑、人工核验重置、文件锁和 SQLite 多进程领取任务。该服务仅处理合成数据，不连接本机真实 Zotero。
+
 旧 SQLite 台账保留 schema_version=1 和原文献 ID，首次导入时自动添加身份别名表；升级前备份已关闭的台账。旧 Zotero v1 收据继续可读。补 DOI 等操作导致已保存题录变化时会阻止重推，需核对已有条目；这不会自动更新 Zotero 条目，也不能保证全库去重。
 
 环境检查可运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check_environment.ps1`，仅输出技能/CLI、EasyConnect 安装与进程信号。认证仍须观察页面。导出遇到残留 `.publish.lock` 时先确认没有活跃导出进程再移除锁；保留已生成成果。所有私人研究输入和导出建议放在 `local-data/` 或仓库外。
