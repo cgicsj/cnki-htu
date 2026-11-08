@@ -9,7 +9,7 @@ description: 通过河南师范大学校园入口和本地浏览器使用中国�
 
 ## 先完成联网环境检查
 
-需要访问网站时，先读取 [浏览器选择](references/browser.md)，并检查当前会话实际提供的浏览器工具。Codex Chrome 插件（`@Chrome`）可用且能连接用户本地 Chrome 时必须优先使用；不能因为项目配置、历史记录或 DevTools MCP 可用就跳过此检查。只有确认插件不可用或无法连接同一用户会话，才回退到能接入该会话的 Chrome DevTools MCP。每轮记录实际使用路线；工具调用超时不等于另一条路线不可用。在环境检查阶段按 [校园 HTTP 权限设置](references/downloads.md)核实并完成“不安全内容”允许规则 `[*.]htu.edu.cn`，不等下载被拦截后才处理；工具无法访问设置页时，指导用户完成并记录确认结果。之后按 [校园访问与认证](references/access.md)核验 VPN 路线和机构认证，再开始检索、下载；进程存在或网页能打开不能单独证明认证成功。
+需要访问网站时，先读取 [浏览器选择](references/browser.md)，按 **腾讯 BrowserSkill → ChatGPT Chrome 插件（`@Chrome`）→ Chrome DevTools MCP** 的顺序检查并选择当前可用、适合本步骤的路线。BrowserSkill 使用实际提供的 `browser-skill` 技能/BrowserSkill MCP；安装技能不代表 CLI、扩展或连接已可用。只有确认前一条路线未提供、连接失败或缺少本步骤所需能力时才依次回退；认证失效、验证码、用户介入或权限确认不是切换工具的理由。每轮记录实际使用路线和回退原因；工具调用超时先核对操作是否已生效，不换路线重复点击或下载。在环境检查阶段按 [校园 HTTP 权限设置](references/downloads.md)核实并完成“不安全内容”允许规则 `[*.]htu.edu.cn`，不等下载被拦截后才处理；工具无法访问设置页时，指导用户完成并记录确认结果。之后按 [校园访问与认证](references/access.md)核验 VPN 路线和机构认证，再开始检索、下载；进程存在或网页能打开不能单独证明认证成功。
 
 - VPN 服务：`https://vpn.htu.edu.cn`
 - 校园知网入口：`http://www-cnki-net-s.vpn.htu.edu.cn:8118`

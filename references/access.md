@@ -15,7 +15,7 @@
 
 ## 检查顺序
 
-1. 先按[浏览器选择](browser.md)检查当前 agent 提供的浏览器能力；优先用 Codex Chrome 插件（`@Chrome`）连接本地 Chrome，插件不可用时再试 Chrome DevTools MCP 等已提供且可接入同一会话的工具。连接不可用时报告实际状态，不切换到未验证的浏览器会话。在实际连接的会话内核验认证，不复用其他会话的登录结论；安装本技能本身不安装浏览器插件或 MCP 服务。
+1. 先按[浏览器选择](browser.md)依次检查腾讯 BrowserSkill、ChatGPT Chrome 插件（`@Chrome`）、Chrome DevTools MCP；仅因工具未提供、连接失败或当前步骤缺少必要能力而回退。BrowserSkill 的 Agent Window、用户标签借用及实例选择遵循其当前说明。实际连接后核验页面与机构认证，不复用其他会话的登录结论，不以切换工具绕过登录、验证码或权限确认；安装本技能本身不安装 BrowserSkill CLI、浏览器扩展或 MCP 服务。
 2. Windows 可运行 `scripts/check_environment.ps1`，得到 EasyConnect 进程和安装路径信号。它明确返回 `authentication=unknown`，不是登录判断器。若本机执行策略阻止脚本，使用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check_environment.ps1`，不要修改全局策略。如果需要打开已安装客户端，运行带 `-LaunchEasyConnect` 的命令，让用户在可见客户端中登录；程序不存在时打开学校说明页让用户下载。其他系统使用当前桌面工具查看 EasyConnect。
 3. 在环境检查阶段先完成 [Chrome 不安全内容设置](downloads.md#用户选择的校园域通配例外)：核实“允许显示不安全内容”列表包含 `[*.]htu.edu.cn`，缺少时按已授权的规则添加。不要等到下载被拦截才设置。已有有效规则不重复添加；工具无法操作内部页面时，立即给用户地址和步骤，等待用户确认设置完成后再开始检索/下载。记录工具实见或用户确认的区别；不能把脚本输出当作已设置。
 4. 如果桌面工具支持，读取 EasyConnect 中实际的已连接/连接成功状态及服务器；不能只看托盘图标或进程名。如果当前环境不能读取客户端状态，标记“客户端状态未核验”，继续用校园页面和机构认证核验可用访问，不能宣称检测到已登录。

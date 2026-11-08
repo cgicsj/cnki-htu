@@ -1,6 +1,6 @@
 # cnki-htu
 
-`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 使用中国知网，优先通过 Codex Chrome 插件（`@Chrome`）操作本地 Chrome，插件不可用时回退 Chrome DevTools MCP，帮助完成文献检索、筛选、下载与整理。
+`cnki-htu` 是面向河南师范大学校园网访问场景的 Codex 技能。它通过用户本地已登录的 EasyConnect/VPN 使用中国知网，按腾讯 BrowserSkill、ChatGPT Chrome 插件（`@Chrome`）、Chrome DevTools MCP 的优先顺序选择可用的浏览器操作工具，帮助完成文献检索、筛选、下载与整理。
 
 ## 功能
 
@@ -15,7 +15,7 @@
 
 ## 使用前准备
 
-- Windows 本地环境、Google Chrome、可连接本地 Chrome 会话的 Codex Chrome 插件（`@Chrome`）或 Chrome DevTools MCP，以及 Python 3.9 或更高版本。技能脚本使用 Python 标准库。
+- Windows 本地环境、Google Chrome，以及腾讯 BrowserSkill、ChatGPT Chrome 插件（`@Chrome`）或 Chrome DevTools MCP 中至少一条实际可用的路线；Python 3.9 或更高版本。BrowserSkill 的技能、CLI/扩展和 MCP 可用性按所选接入方式分别核验，不由本项目自动安装。技能脚本使用 Python 标准库。
 - 需要访问校园资源时，先登录河南师范大学 EasyConnect/VPN，并在所选浏览器中确认知网机构认证有效。校园访问入口和故障处理见[访问与认证说明](references/access.md)。
 - 下载 PDF、Zotero 推送等能力受机构订阅、账号权限、浏览器设置及 Zotero 本地服务状态影响。
 - 首次登录、验证码或重新认证由用户在本机浏览器中完成；请勿在聊天中发送密码、验证码或浏览器 Cookie。
@@ -51,7 +51,7 @@ git clone https://github.com/cgicsj/cnki-htu.git "$env:USERPROFILE\.codex\skills
 
 ## 浏览器选择
 
-网页任务先检查当前 agent 提供的浏览器能力：优先用 Codex Chrome 插件（`@Chrome`）连接本地 Chrome；插件不可用或无法接入时，再使用 Chrome DevTools MCP 等可连接同一会话的工具。连接不可用时明确报告实际状态；每个会话需要单独核验校园认证，不能沿用其他会话的登录结论。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
+网页任务按 **腾讯 BrowserSkill → ChatGPT Chrome 插件（`@Chrome`）→ Chrome DevTools MCP** 逐项检查；前一条路线未提供、连接失败或缺少当前步骤所需能力时才回退。BrowserSkill 默认使用所选本地浏览器实例的 Agent Window，借用用户标签须遵循其确认流程；不能假定不同工具自动共用标签或登录状态。切换后重新观察页面和机构认证；不以切换工具绕过登录、验证码或权限确认，也不重复结果不明的下载。详见[浏览器选择](references/browser.md)。离线任务不要求 VPN 或浏览器。
 
 ## 离线快速示例与测试
 

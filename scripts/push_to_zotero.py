@@ -176,6 +176,27 @@ def _sse_messages(raw):
     return messages
 
 
+def _read_sse_response(response, expected_id):
+    """Return a matching, complete SSE event without waiting for stream EOF."""
+    data = []
+    for raw_line in response:
+        line = raw_line.decode('utf-8').rstrip('\r\n')
+        if line.startswith('data:'):
+            value = line[5:]
+            data.append(value[1:] if value.startswith(' ') else value)
+        elif line == '' and data:
+            message = '\n'.join(data)
+            data = []
+            try:
+                item = json.loads(message)
+            except ValueError:
+                continue
+            if (isinstance(item, dict) and type(item.get('id')) is type(expected_id)
+                    and item.get('id') == expected_id):
+                return rpc_response(item, expected_id)
+    raise MCPError('Zotero MCP SSE stream ended without a complete matching response')
+
+
 def _mcp_value(result):
     """Unwrap common MCP tool-result shapes into Python data."""
     if not isinstance(result, dict):
@@ -246,24 +267,15 @@ class ZoteroMCP:
             headers['MCP-Protocol-Version'] = self.protocol_version
         request = urllib.request.Request(self.endpoint, data=json.dumps(payload).encode('utf-8'), headers=headers)
         with self.opener.open(request, timeout=20) as response:
-            raw = response.read().decode('utf-8', 'replace')
             response_headers = dict(response.headers.items())
+            content_type = response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+            if content_type == 'text/event-stream':
+                if 'id' not in payload:
+                    raise MCPError('Zotero MCP returned an SSE stream for a notification')
+                return _read_sse_response(response, payload['id']), response_headers
+            raw = response.read().decode('utf-8', 'replace')
         if not raw.strip() and payload.get('method', '').startswith('notifications/'):
             return {}, response_headers
-        messages = _sse_messages(raw)
-        if messages:
-            parsed = []
-            for message in messages:
-                try:
-                    parsed.append(json.loads(message))
-                except ValueError:
-                    continue
-            if not parsed:
-                raise MCPError('Zotero MCP returned a non-JSON SSE response')
-            for item in parsed:
-                if isinstance(item, dict) and item.get('id') == payload.get('id') and ('result' in item or 'error' in item):
-                    return rpc_response(item, payload['id']), response_headers
-            raise MCPError('Zotero MCP SSE response does not match the request')
         try:
             value = json.loads(raw)
         except ValueError as exc:
