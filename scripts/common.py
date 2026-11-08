@@ -5,6 +5,25 @@ import re
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 
+def reject_credentials(value):
+    """Reject explicit credential fields, including nested JSON metadata."""
+    forbidden = {'cookie', 'cookies', 'password', 'authorization', 'token',
+                 'access_token', 'refresh_token', 'id_token', 'api_key', 'apikey'}
+    pending, seen = [value], set()
+    while pending:
+        item = pending.pop()
+        if not isinstance(item, (dict, list)) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str) and key.casefold().replace('-', '_') in forbidden:
+                    raise ValueError('Credentials must not be persisted in research inputs')
+                pending.append(child)
+        else:
+            pending.extend(item)
+
+
 def doi(value):
     if not isinstance(value, str):
         raise ValueError('DOI must be text')
@@ -18,6 +37,7 @@ def source_url(value, allow_proxy=True):
     if not isinstance(value, str) or not value.strip():
         raise ValueError('URL must be non-empty text')
     p = urlsplit(value)
+    p.port  # Force urllib's validation of numeric ports and their range.
     if p.scheme not in ('http', 'https') or not p.hostname or p.username is not None or p.password is not None or p.fragment:
         raise ValueError('Use an http(s) source URL without credentials or fragments')
     sensitive = r'token|ticket|session|password|cookie|authorization|saml|signature|(?:^|[_-])auth(?:$|[_-])'
@@ -31,19 +51,24 @@ def source_url(value, allow_proxy=True):
     if unquote(decoded) != decoded:
         raise ValueError('Excessively encoded source URL')
     parts = urlsplit(decoded)
+    parts.port
     if parts.username is not None or parts.password is not None or parts.fragment:
         raise ValueError('Encoded credentials/fragments are not accepted')
     if any(re.search(sensitive, key, re.I) for key, _ in parse_qsl(parts.query, keep_blank_values=True)):
         raise ValueError('Do not persist session-bearing URLs')
-    if re.search(r'(?:token|ticket|session|password|cookie|authorization|signature|auth)[=/]', parts.path, re.I):
+    if re.search(r'(?:token|ticket|j?session(?:[_-]?id)?|password|cookie|authorization|signature|auth)[=/]', parts.path, re.I):
         raise ValueError('Do not persist authentication paths')
-    if not allow_proxy and (p.hostname == 'vpn.htu.edu.cn' or p.hostname.endswith('.vpn.htu.edu.cn')):
-        raise ValueError('Use an observed public URL/DOI, or omit the campus proxy URL')
+    if not allow_proxy:
+        # Compare the DNS identity, including encoded/IDNA dot variants and the
+        # optional trailing root dot, without rewriting the observed URL.
+        host = (parts.hostname or '').encode('idna').decode('ascii').lower().rstrip('.')
+        if host == 'vpn.htu.edu.cn' or host.endswith('.vpn.htu.edu.cn'):
+            raise ValueError('Use an observed public URL/DOI, or omit the campus proxy URL')
     return value
 
 
 def evidence_source(value):
-    if value.startswith(('http:', 'https:')):
+    if value.lower().startswith(('http:', 'https:')):
         return source_url(value)
     if not Path(value).is_absolute():
         raise ValueError('Evidence source must be a source URL or absolute local path')
@@ -115,6 +140,7 @@ def validate_record(rec):
     """Validate optional record fields before a ledger import."""
     if not isinstance(rec, dict):
         raise ValueError('Each record must be an object')
+    reject_credentials(rec)
     for key in ('title', 'url', 'retrieved_at'):
         if not isinstance(rec.get(key), str) or not rec[key].strip():
             raise ValueError(key + ' must be non-empty text')

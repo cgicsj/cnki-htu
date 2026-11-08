@@ -14,7 +14,7 @@ from test_regressions import record, synthetic_pdf, zotero as z
 
 
 @contextmanager
-def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=False, newline='\n'):
+def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=False, newline='\n', paginated_tools=False):
     seen = []
     release = threading.Event()
     tools = ['get_libraries', 'get_collections', 'write_item', 'add_items_to_collection']
@@ -43,7 +43,13 @@ def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=Fa
                 result = {'protocolVersion': '2024-11-05', 'capabilities': {},
                           'serverInfo': {'name': 'synthetic', 'version': '1'}}
             elif method == 'tools/list':
-                result = {'tools': [{'name': name} for name in tools]}
+                if paginated_tools and 'cursor' not in payload.get('params', {}):
+                    result = {'tools': [{'name': name} for name in tools[:2]],
+                              'nextCursor': '' if fault == 'empty-cursor' else 'tools-page-2'}
+                else:
+                    result = {'tools': [{'name': name} for name in (tools[2:] if paginated_tools else tools)]}
+                    if fault == 'repeated-cursor':
+                        result['nextCursor'] = 'tools-page-2'
             else:
                 params = payload['params']
                 name, arguments = params['name'], params['arguments']
@@ -105,6 +111,79 @@ def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=Fa
 
 
 class HTTPTransportTests(unittest.TestCase):
+    def test_connector_truncated_response_is_uncertain_and_not_resent(self):
+        # HTTP 201 alone must not turn a broken transfer into a confirmed reply.
+        for code in (201, 400):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as td:
+                writes = []
+                class Handler(BaseHTTPRequestHandler):
+                    def log_message(self, *args):
+                        pass
+                    def do_POST(self):
+                        self.rfile.read(int(self.headers['Content-Length']))
+                        if self.path.endswith('getSelectedCollection'):
+                            body = json.dumps(dict(libraryID=1, libraryEditable=True,
+                                                   filesEditable=True)).encode()
+                            self.send_response(200)
+                            self.send_header('Content-Length', str(len(body)))
+                            self.end_headers()
+                            self.wfile.write(body)
+                        else:
+                            writes.append(self.path)
+                            self.send_response(code)
+                            self.send_header('Content-Length', '1000')
+                            self.end_headers()
+                            self.wfile.write(b'{')
+                            self.wfile.flush()
+                            self.close_connection = True
+                server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+                worker = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+                worker.start()
+                try:
+                    with patch.object(z, 'API', 'http://127.0.0.1:' + str(server.server_port) + '/connector/'):
+                        client = z.Client()
+                        state = Path(td) / 'receipt.json'
+                        for _ in range(2):
+                            result = z.push([record()], state, 'L1', client)
+                            self.assertFalse(result['complete'])
+                            self.assertEqual(result['results'][0]['status'], 'uncertain')
+                        self.assertEqual(len(writes), 1)
+                        row = next(iter(json.loads(state.read_text(encoding='utf-8'))['records'].values()))
+                        self.assertEqual(row['metadata'], 'uncertain')
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    worker.join(timeout=5)
+
+    def test_paginated_tool_discovery_keeps_mcp_transport_available(self):
+        with mcp_server(paginated_tools=True) as (endpoint, seen):
+            mcp = z.ZoteroMCP(endpoint)
+            try:
+                self.assertIn('write_item', mcp.tools)
+                self.assertIn('add_items_to_collection', mcp.tools)
+                pages = [p['params'] for p, _ in seen if p['method'] == 'tools/list']
+                self.assertEqual(pages, [{}, {'cursor': 'tools-page-2'}])
+                self.assertEqual(mcp.inventory()[0][0]['libraryID'], 1)
+            finally:
+                mcp.close()
+
+    def test_repeated_tool_page_cursor_rejected_without_writes(self):
+        with mcp_server(paginated_tools=True, fault='repeated-cursor') as (endpoint, seen):
+            with self.assertRaises(z.MCPUnavailable):
+                z.ZoteroMCP(endpoint)
+            self.assertEqual(len([p for p, _ in seen if p['method'] == 'tools/list']), 2)
+            self.assertFalse(any(p.get('params', {}).get('name') == 'write_item' for p, _ in seen))
+
+    def test_tool_cursor_is_opaque_including_empty_string(self):
+        with mcp_server(paginated_tools=True, fault='empty-cursor') as (endpoint, seen):
+            mcp = z.ZoteroMCP(endpoint)
+            try:
+                self.assertIn('write_item', mcp.tools)
+                pages = [p['params'] for p, _ in seen if p['method'] == 'tools/list']
+                self.assertEqual(pages, [{}, {'cursor': ''}])
+            finally:
+                mcp.close()
+
     def test_sse_push_finishes_before_stream_eof_including_chunked_body(self):
         # A short socket timeout makes waiting for EOF fail deterministically;
         # the server holds each stream until the test leaves its context.

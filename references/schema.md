@@ -151,6 +151,10 @@ Do not manually edit SQLite while a task is running or copy an active transactio
 
 ## Identity upgrades and compatibility
 
+JSON 输入中的显式凭据字段（如 cookie、password、Authorization、access_token，含嵌套对象/列表）会在持久化前被拒绝。失败导入批次整体回滚，不保留前面已处理的题录。来源链接同时检查端口与路径中的会话标识，包括编码形式的 jsessionid；引用转换和 Zotero 输入采用相同约束。可选题录字段的 null 保持为缺失，不转换成字符串。
+
+导出前还会检查旧台账的配置、题录、证据及事件 JSON；发现显式凭据或不安全来源时停止导出，避免复制到审计快照。程序不会自动删除或改写旧数据，须先核对并清理不应保存的内容。此校验针对结构化字段和来源 URL，不能替代对自由文本中敏感信息的人工核对。
+
 Import builds batch indexes for normalized DOI, CNKI database/record ID, observed URLs and title/year warnings. Stable paper IDs never change after enrichment. Existing schema-v1 ledgers gain a `paper_aliases` table transactionally on first import; close the task and back it up before upgrading. New observed URL aliases persist across restarts. Conflicting strong IDs or multiple existing matches stop the transaction; existing duplicate rows are not silently merged.
 
 An explicitly incomplete author list can be upgraded to a verified complete list when the old list is a prefix in the same order. Other author changes remain conflicts requiring source review. Enrichment records before/after metadata in the event history. Session-bearing URLs, including encoded parameters, are rejected; extraction sources must be safe source URLs or absolute local paths.

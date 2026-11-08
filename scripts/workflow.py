@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
-from common import validate_record, source_url, aliases, merge_metadata, evidence_source, normalize_journal
+from common import validate_record, source_url, aliases, merge_metadata, evidence_source, normalize_journal, reject_credentials
 from xml.sax.saxutils import escape
 import zipfile
 
@@ -53,18 +53,22 @@ def connect(path):
     if not Path(path).is_file():
         raise ValueError('Task does not exist; run init first')
     db = sqlite3.connect(str(path), timeout=10)
-    db.row_factory = sqlite3.Row
-    db.execute('PRAGMA foreign_keys=ON')
-    version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-    if not version or json.loads(version[0]) != 1:
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA foreign_keys=ON')
+        version = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if not version or json.loads(version[0]) != 1:
+            raise ValueError('Unsupported ledger version')
+    except Exception:
         db.close()
-        raise ValueError('Unsupported ledger version')
+        raise
     return db
 
 
 def init(path, config):
     if not isinstance(config, dict):
         raise ValueError('Config must be an object')
+    reject_credentials(config)
     for key in ('topic', 'query', 'criteria'):
         required(config.get(key), key)
     if config.get('required_access', 'available') not in ('available', 'full_text'):
@@ -104,6 +108,7 @@ def config(db):
 
 
 def event(db, pid, action, detail):
+    reject_credentials(detail)
     db.execute('INSERT INTO events(at,paper_id,action,detail) VALUES (?,?,?,?)', (now(), pid, action, dump(detail)))
 
 
@@ -139,6 +144,7 @@ def import_records(db, records):
     def title_key(rec):
         return (re.sub(r'\s+', '', rec['title']).casefold(), str(rec.get('year', '')))
     def register(pid, rec):
+        reject_credentials(rec)
         rec = normalize_journal(rec)
         metadata[pid] = rec
         for key in aliases(rec):
@@ -188,6 +194,7 @@ def import_records(db, records):
 def screen(db, pid, value):
     if not isinstance(value, dict):
         raise ValueError('Screening input must be an object')
+    reject_credentials(value)
     paper(db, pid)
     stage(db, pid, 'screening')
     if value.get('decision') not in DECISIONS:
@@ -219,6 +226,7 @@ def screen(db, pid, value):
 def extract(db, pid, value):
     if not isinstance(value, dict):
         raise ValueError('Extraction input must be an object')
+    reject_credentials(value)
     p = paper(db, pid)
     stage(db, pid, 'extraction')
     if not p['screening'] or json.loads(p['screening'])['decision'] != 'include':
@@ -422,7 +430,26 @@ def write_xlsx(path, sheets):
             z.writestr('xl/worksheets/sheet%d.xml' % i, '<worksheet xmlns="' + ns + '"><dimension ref="A1:%s%d"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="%d" width="28" customWidth="1"/></cols><sheetData>' % (column(width), len(rows), width) + ''.join(body) + '</sheetData><autoFilter ref="A1:%s%d"/></worksheet>' % (column(width), len(rows)))
 
 
+def validate_saved_inputs(db):
+    """Do not copy legacy credential fields into exported audit snapshots."""
+    for row in db.execute('SELECT value FROM meta'):
+        reject_credentials(json.loads(row[0]))
+    for row in db.execute('SELECT metadata,screening,extraction FROM papers'):
+        for value in row:
+            if value:
+                reject_credentials(json.loads(value))
+        metadata = json.loads(row[0])
+        source_url(metadata['url'])
+        if row[2]:
+            for cell in json.loads(row[2]).get('fields', {}).values():
+                if cell:
+                    evidence_source(cell['source'])
+    for row in db.execute('SELECT detail FROM events'):
+        reject_credentials(json.loads(row[0]))
+
+
 def export(db, directory, checked=None):
+    validate_saved_inputs(db)
     queue(db, checked)  # Revalidate recorded artifacts before reporting completion.
     dest = Path(directory)
     if dest.exists():
@@ -495,7 +522,7 @@ def main(argv=None):
             finally:
                 db.close()
         print(json.dumps(result, ensure_ascii=False, indent=2))
-    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, RecursionError) as exc:
         parser.exit(1, str(exc) + '\n')
 
 

@@ -8,6 +8,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import html
+import http.client
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ from urllib.parse import urlsplit, parse_qsl, unquote
 import uuid
 
 from convert import normalize
-from common import aliases, legacy_identities, merge_metadata, source_url
+from common import aliases, legacy_identities, merge_metadata, source_url, reject_credentials
 
 API = 'http://127.0.0.1:23119/connector/'
 MCP_API = os.environ.get('ZOTERO_MCP_URL', 'http://127.0.0.1:23120/mcp')
@@ -52,6 +53,7 @@ def parse_elearning(text):
 def prepare(raw):
     if not isinstance(raw, dict):
         raise ValueError('Each paper must be an object')
+    reject_credentials(raw)
     if any(k.lower() in ('cookies', 'cookie', 'password', 'authorization', 'pdfurl', 'token') for k in raw):
         raise ValueError('Credentials and remote PDF URLs are not accepted; use a verified local pdf_path')
     rec = parse_elearning(raw['ELEARNING']) if 'ELEARNING' in raw else {}
@@ -129,11 +131,13 @@ class Client:
             headers['X-Metadata'] = json.dumps(metadata, ensure_ascii=True)
         req = urllib.request.Request(API + endpoint, data=body, headers=headers)
         try:
-            with self.opener.open(req, timeout=60 if blob is not None else 15) as response:
-                status, raw = response.status, response.read()
-        except urllib.error.HTTPError as exc:
-            status, raw = exc.code, exc.read()
-        except (urllib.error.URLError, TimeoutError, OSError):
+            try:
+                with self.opener.open(req, timeout=60 if blob is not None else 15) as response:
+                    status, raw = response.status, response.read()
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    status, raw = exc.code, exc.read()
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
             return 0, {'error': 'connection_error_or_timeout'}
         try:
             return status, json.loads(raw) if raw else {}
@@ -160,6 +164,14 @@ def rpc_response(value, expected_id):
 def _permission(value):
     """Return an explicit MCP permission flag, or None when it is unknown."""
     return value if isinstance(value, bool) else None
+
+
+def _combined_permission(*values):
+    """An explicit denial from either transport/scope overrides permission."""
+    flags = [_permission(value) for value in values]
+    if False in flags:
+        return False
+    return True if True in flags else None
 
 
 def _sse_messages(raw):
@@ -269,8 +281,24 @@ class ZoteroMCP:
             if 'error' in result:
                 raise MCPUnavailable('Zotero MCP initialization failed')
             self._post({'jsonrpc': '2.0', 'method': 'notifications/initialized', 'params': {}})
-            listed = self._post({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}})[0]
-            self.tools = {tool['name'] for tool in listed.get('result', {}).get('tools', [])}
+            self.tools = set()
+            cursor, seen_cursors = None, set()
+            while True:
+                params = {} if cursor is None else {'cursor': cursor}
+                listed = self._post({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': params})[0]
+                page = listed.get('result')
+                if 'error' in listed or not isinstance(page, dict) or not isinstance(page.get('tools'), list):
+                    raise MCPUnavailable('Zotero MCP returned an invalid tool page')
+                for tool in page['tools']:
+                    if not isinstance(tool, dict) or not isinstance(tool.get('name'), str) or not tool['name']:
+                        raise MCPUnavailable('Zotero MCP returned an invalid tool record')
+                    self.tools.add(tool['name'])
+                cursor = page.get('nextCursor')
+                if cursor is None:
+                    break
+                if not isinstance(cursor, str) or cursor in seen_cursors:
+                    raise MCPUnavailable('Zotero MCP returned an invalid or repeated tool cursor')
+                seen_cursors.add(cursor)
             required = {'get_libraries', 'get_collections', 'write_item', 'add_items_to_collection'}
             if not required.issubset(self.tools):
                 raise MCPUnavailable('Zotero MCP lacks required library/write tools')
@@ -330,9 +358,7 @@ class ZoteroMCP:
                 raise MCPError('Zotero MCP returned an invalid library record')
             library_id = int(library['libraryID'])
             library_type = str(library.get('libraryType', '')).lower()
-            library_editable = _permission(library.get('libraryEditable'))
-            if library_editable is None:
-                library_editable = _permission(library.get('editable'))
+            library_editable = _combined_permission(library.get('libraryEditable'), library.get('editable'))
             files_editable = _permission(library.get('filesEditable'))
             if library_type == 'feed':
                 library_editable = False
@@ -352,14 +378,9 @@ class ZoteroMCP:
                 for row in rows if isinstance(rows, list) else []:
                     if not isinstance(row, dict) or not row.get('key'):
                         continue
-                    collection_editable = _permission(row.get('libraryEditable'))
-                    if collection_editable is None:
-                        collection_editable = _permission(row.get('editable'))
-                    if collection_editable is None:
-                        collection_editable = library_editable
-                    collection_files = _permission(row.get('filesEditable'))
-                    if collection_files is None:
-                        collection_files = files_editable
+                    collection_editable = _combined_permission(
+                        row.get('libraryEditable'), row.get('editable'), library_editable)
+                    collection_files = _combined_permission(row.get('filesEditable'), files_editable)
                     targets.append({'target': f'M{library_id}:{row["key"]}', 'libraryID': library_id,
                                     'collectionKey': row['key'], 'name': row.get('name', ''),
                                     'path': row.get('path', row.get('name', '')), 'type': 'collection',
@@ -462,8 +483,17 @@ class MCPAdapter:
                 raise RuntimeError('Selected collection is ambiguous or missing in Zotero MCP; use its M<libraryID>:<collectionKey> target from --list')
             match = matches[0]
             canonical_target = f'M{library_id}:{match["collectionKey"]}'
+            library = next((row for row in libraries if int(row.get('libraryID', -1)) == library_id), {})
+            editable = _combined_permission(
+                connector_data.get('libraryEditable'), connector_data.get('editable'),
+                match.get('libraryEditable'), match.get('editable'),
+                library.get('libraryEditable'), library.get('editable'))
+            files_editable = _combined_permission(
+                connector_data.get('filesEditable'), match.get('filesEditable'),
+                library.get('filesEditable'))
             self.selection = dict(connector_data, collectionKey=match['collectionKey'],
-                                  canonicalTarget=canonical_target)
+                                  canonicalTarget=canonical_target, libraryEditable=editable,
+                                  editable=editable, filesEditable=files_editable)
             return target, self.selection
         if target.startswith('L') and target[1:].isdigit():
             library_id = int(target[1:])

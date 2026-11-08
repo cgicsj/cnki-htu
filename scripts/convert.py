@@ -7,7 +7,7 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
-from common import aliases, doi, merge_metadata, normalize_journal, source_url
+from common import aliases, doi, merge_metadata, normalize_journal, source_url, reject_credentials
 
 
 def clean(value):
@@ -87,6 +87,7 @@ def parse_tagged(text, kind):
 def normalize(rec):
     if not isinstance(rec, dict):
         raise ValueError("each record must be an object")
+    reject_credentials(rec)
     if rec.get("type", "article") != "article":
         raise ValueError("only journal article records supported")
     # schema.md documents `source`; formats.md and BibTeX use `journal`.
@@ -101,7 +102,9 @@ def normalize(rec):
         raise ValueError("incomplete author list")
     out = {"authors": authors}
     for key in ("title", "journal", "year", "volume", "issue", "pages", "doi", "url", "cnki_id"):
-        value = clean(rec.get(key, ""))
+        if rec.get(key) is None:
+            continue
+        value = clean(rec[key])
         if value:
             out[key] = value
     if not out.get("title") or not out.get("journal"):
@@ -191,7 +194,7 @@ def main():
         with args.output.open("x", encoding="utf-8") as dest:
             dest.write(result)
         print(json.dumps({"entries": count, "warnings": warnings}, ensure_ascii=False))
-    except (ValueError, OSError, UnicodeError, LookupError) as exc:
+    except (ValueError, OSError, UnicodeError, LookupError, RecursionError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return 0
