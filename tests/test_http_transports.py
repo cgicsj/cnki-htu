@@ -14,7 +14,7 @@ from test_regressions import record, synthetic_pdf, zotero as z
 
 
 @contextmanager
-def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=False):
+def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=False, newline='\n'):
     seen = []
     release = threading.Event()
     tools = ['get_libraries', 'get_collections', 'write_item', 'add_items_to_collection']
@@ -67,6 +67,8 @@ def mcp_server(sse=False, session=False, fault=None, hold_open=False, chunked=Fa
                 body = 'data: ' + noise + '\n\ndata: ' + body + '\n\n'
                 if method == 'tools/call' and payload['params']['name'] == 'write_item' and fault == 'no-result':
                     body = ': keep-alive\n\n'
+            if sse:
+                body = body.replace('\n', newline)
             body = body.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream; charset=utf-8' if sse else 'application/json')
@@ -107,7 +109,7 @@ class HTTPTransportTests(unittest.TestCase):
         # A short socket timeout makes waiting for EOF fail deterministically;
         # the server holds each stream until the test leaves its context.
         for chunked in (False, True):
-            with self.subTest(chunked=chunked), tempfile.TemporaryDirectory() as td, mcp_server(sse=True, hold_open=True, chunked=chunked) as (endpoint, seen):
+            with self.subTest(chunked=chunked), tempfile.TemporaryDirectory() as td, mcp_server(sse=True, hold_open=True, chunked=chunked, newline='\r' if chunked else '\n') as (endpoint, seen):
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 class ShortTimeout:
                     def open(self, request, timeout):
@@ -174,6 +176,15 @@ class HTTPTransportTests(unittest.TestCase):
     def test_sse_rpc_error_is_returned_for_existing_error_handling(self):
         frame = b'data: {"jsonrpc":"2.0","id":3,"error":{"code":-32000}}\n\n'
         self.assertEqual(z._read_sse_response(io.BytesIO(frame), 3)['error']['code'], -32000)
+
+    def test_sse_line_endings_bom_and_utf8_split_across_reads(self):
+        class ByteAtATime(io.BytesIO):
+            def read1(self, size):
+                return super().read1(1)
+        for newline in ('\n', '\r\n', '\r'):
+            frame = '\ufeffdata: {"jsonrpc":"2.0","id":3,"result":{"title":"中文"}}' + newline * 2
+            with self.subTest(newline=newline):
+                self.assertEqual(z._read_sse_response(ByteAtATime(frame.encode('utf-8')), 3)['result']['title'], '中文')
 
     def test_json_and_sse_push_metadata_and_pdf_with_and_without_sessions(self):
         for sse in (False, True):

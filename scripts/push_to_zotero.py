@@ -176,11 +176,33 @@ def _sse_messages(raw):
     return messages
 
 
+def _sse_lines(response):
+    """Split streaming bytes on LF, CRLF or CR without waiting after CR."""
+    pending, after_cr = bytearray(), False
+    while True:
+        chunk = response.read1(65536)
+        if not chunk:
+            return  # An unterminated line is not a complete SSE event.
+        for byte in chunk:
+            if after_cr and byte == 10:
+                after_cr = False
+                continue
+            after_cr = byte == 13
+            if byte in (10, 13):
+                yield bytes(pending)
+                pending.clear()
+            else:
+                pending.append(byte)
+
+
 def _read_sse_response(response, expected_id):
     """Return a matching, complete SSE event without waiting for stream EOF."""
-    data = []
-    for raw_line in response:
-        line = raw_line.decode('utf-8').rstrip('\r\n')
+    data, first_line = [], True
+    for raw_line in _sse_lines(response):
+        line = raw_line.decode('utf-8')
+        if first_line:
+            line = line.lstrip('\ufeff')
+            first_line = False
         if line.startswith('data:'):
             value = line[5:]
             data.append(value[1:] if value.startswith(' ') else value)
